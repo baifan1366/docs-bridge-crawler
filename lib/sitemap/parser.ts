@@ -12,9 +12,21 @@ export interface SitemapEntry {
 }
 
 export async function parseSitemap(sitemapUrl: string): Promise<SitemapEntry[]> {
-  const response = await fetch(sitemapUrl);
+  console.log(`[SITEMAP] Fetching sitemap from: ${sitemapUrl}`);
+  const fetchStart = Date.now();
+  
+  const response = await fetch(sitemapUrl, {
+    signal: AbortSignal.timeout(30000) // 30 second timeout
+  });
+  
+  console.log(`[SITEMAP] Fetch completed in ${Date.now() - fetchStart}ms, status: ${response.status}`);
+  
   const xml = await response.text();
+  console.log(`[SITEMAP] XML size: ${xml.length} bytes`);
+  
+  const parseStart = Date.now();
   const parsed = await parseStringPromise(xml);
+  console.log(`[SITEMAP] XML parsed in ${Date.now() - parseStart}ms`);
 
   const urls: SitemapEntry[] = [];
 
@@ -27,6 +39,13 @@ export async function parseSitemap(sitemapUrl: string): Promise<SitemapEntry[]> 
         priority: parseFloat(entry.priority?.[0] || '0.5')
       });
     }
+    console.log(`[SITEMAP] Found ${urls.length} URLs in sitemap`);
+  } else if (parsed.sitemapindex?.sitemap) {
+    console.log(`[SITEMAP] Found sitemap index with ${parsed.sitemapindex.sitemap.length} sitemaps`);
+    // Handle sitemap index - just log for now
+    console.warn('[SITEMAP] Sitemap index detected but not fully supported yet');
+  } else {
+    console.warn('[SITEMAP] No URLs found in sitemap');
   }
 
   return urls;
@@ -37,34 +56,76 @@ export async function getUpdatedUrls(
   supabase: any,
   sourceId: string
 ): Promise<string[]> {
+  console.log(`[SITEMAP] Starting getUpdatedUrls for source: ${sourceId}`);
+  const totalStart = Date.now();
+  
   const entries = await parseSitemap(sitemapUrl);
+  console.log(`[SITEMAP] Parsed ${entries.length} entries from sitemap`);
+  
+  if (entries.length === 0) {
+    console.log('[SITEMAP] No entries found in sitemap');
+    return [];
+  }
+
+  // Batch fetch existing pages to avoid N+1 queries
+  const dbStart = Date.now();
+  const urls = entries.map(e => e.url);
+  console.log(`[SITEMAP] Fetching existing pages from DB for ${urls.length} URLs...`);
+  
+  const { data: existingPages, error } = await supabase
+    .from('crawler_pages')
+    .select('url, sitemap_lastmod')
+    .eq('source_id', sourceId)
+    .in('url', urls);
+
+  if (error) {
+    console.error('[SITEMAP] Error fetching existing pages:', error);
+    throw error;
+  }
+
+  console.log(`[SITEMAP] DB query completed in ${Date.now() - dbStart}ms, found ${existingPages?.length || 0} existing pages`);
+
+  // Create a map for quick lookup
+  const existingMap = new Map(
+    (existingPages || []).map(p => [p.url, p.sitemap_lastmod])
+  );
+
   const updatedUrls: string[] = [];
+  let newPages = 0;
+  let updatedPages = 0;
+  let unchangedPages = 0;
 
   for (const entry of entries) {
-    // Check if page exists and compare lastmod
-    const { data: existingPage } = await supabase
-      .from('crawler_pages')
-      .select('sitemap_lastmod')
-      .eq('url', entry.url)
-      .eq('source_id', sourceId)
-      .single();
+    const existingLastmod = existingMap.get(entry.url);
 
-    if (!existingPage) {
+    if (!existingLastmod) {
       // New page
       updatedUrls.push(entry.url);
-    } else if (entry.lastmod && existingPage.sitemap_lastmod) {
+      newPages++;
+    } else if (entry.lastmod) {
       // Compare lastmod dates
       const sitemapDate = new Date(entry.lastmod);
-      const existingDate = new Date(existingPage.sitemap_lastmod);
+      const existingDate = new Date(existingLastmod);
       
       if (sitemapDate > existingDate) {
         updatedUrls.push(entry.url);
+        updatedPages++;
+      } else {
+        unchangedPages++;
       }
     } else {
-      // No lastmod, need to check with If-Modified-Since
+      // No lastmod in sitemap, need to check with If-Modified-Since
       updatedUrls.push(entry.url);
+      updatedPages++;
     }
   }
+
+  const totalTime = Date.now() - totalStart;
+  console.log(`[SITEMAP] Analysis complete in ${totalTime}ms:`);
+  console.log(`[SITEMAP]   - New pages: ${newPages}`);
+  console.log(`[SITEMAP]   - Updated pages: ${updatedPages}`);
+  console.log(`[SITEMAP]   - Unchanged pages: ${unchangedPages}`);
+  console.log(`[SITEMAP]   - Total to crawl: ${updatedUrls.length}`);
 
   return updatedUrls;
 }

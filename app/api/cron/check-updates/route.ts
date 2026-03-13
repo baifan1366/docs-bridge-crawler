@@ -47,31 +47,56 @@ export async function GET(request: NextRequest) {
       }
 
       console.log(`[CRON] Checking ${source.name}...`);
+      const sourceStart = Date.now();
 
-      // Get updated URLs from sitemap
-      const urlsToUpdate = await getUpdatedUrls(
-        source.sitemap_url,
-        supabase,
-        source.id
-      );
+      try {
+        // Get updated URLs from sitemap
+        const urlsToUpdate = await getUpdatedUrls(
+          source.sitemap_url,
+          supabase,
+          source.id
+        );
 
-      if (urlsToUpdate.length > 0) {
-        console.log(`[CRON] Found ${urlsToUpdate.length} updated URLs for ${source.name}`);
-        
-        // Extract domain for flow control
-        const domain = new URL(source.base_url).hostname;
+        console.log(`[CRON] Source check completed in ${Date.now() - sourceStart}ms`);
 
-        // Enqueue with flow control
-        for (const url of urlsToUpdate) {
-          await enqueueCrawlWithFlowControl(url, source.id, domain);
+        if (urlsToUpdate.length > 0) {
+          console.log(`[CRON] Found ${urlsToUpdate.length} updated URLs for ${source.name}`);
+          
+          // Limit URLs to prevent timeout (max 50 per cron run)
+          const MAX_URLS_PER_RUN = 50;
+          const urlsToEnqueue = urlsToUpdate.slice(0, MAX_URLS_PER_RUN);
+          
+          if (urlsToUpdate.length > MAX_URLS_PER_RUN) {
+            console.log(`[CRON] Limiting to ${MAX_URLS_PER_RUN} URLs (${urlsToUpdate.length - MAX_URLS_PER_RUN} will be processed in next run)`);
+          }
+          
+          // Extract domain for flow control
+          const domain = new URL(source.base_url).hostname;
+
+          // Enqueue with flow control
+          console.log(`[CRON] Enqueueing ${urlsToEnqueue.length} URLs...`);
+          const enqueueStart = Date.now();
+          
+          for (const url of urlsToEnqueue) {
+            await enqueueCrawlWithFlowControl(url, source.id, domain);
+          }
+          
+          console.log(`[CRON] Enqueue completed in ${Date.now() - enqueueStart}ms`);
+
+          stats.push({
+            source: source.name,
+            urls_enqueued: urlsToEnqueue.length,
+            urls_pending: urlsToUpdate.length - urlsToEnqueue.length
+          });
+        } else {
+          console.log(`[CRON] No updates for ${source.name}`);
         }
-
+      } catch (error) {
+        console.error(`[CRON] Error processing ${source.name}:`, error);
         stats.push({
           source: source.name,
-          urls_enqueued: urlsToUpdate.length
+          error: error instanceof Error ? error.message : 'Unknown error'
         });
-      } else {
-        console.log(`[CRON] No updates for ${source.name}`);
       }
     }
 
