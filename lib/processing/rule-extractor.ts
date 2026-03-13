@@ -105,7 +105,7 @@ export function extractWithRules(html: string, text: string): ExtractedData {
   return result;
 }
 
-function findSectionByHeading($: cheerio.CheerioAPI, keywords: string[]): cheerio.Cheerio | null {
+function findSectionByHeading($: cheerio.CheerioAPI, keywords: string[]): cheerio.Cheerio<cheerio.Element> | null {
   const headings = $('h1, h2, h3, h4, h5, h6');
   
   for (let i = 0; i < headings.length; i++) {
@@ -120,7 +120,7 @@ function findSectionByHeading($: cheerio.CheerioAPI, keywords: string[]): cheeri
   return null;
 }
 
-function extractListItems($: cheerio.CheerioAPI, section: cheerio.Cheerio): string[] {
+function extractListItems($: cheerio.CheerioAPI, section: cheerio.Cheerio<cheerio.Element>): string[] {
   const items: string[] = [];
   
   section.find('li').each((i, elem) => {
