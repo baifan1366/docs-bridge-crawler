@@ -1,94 +1,111 @@
 /**
  * Embedding generation for crawler service
- * Uses @huggingface/transformers with singleton pattern for Next.js
+ * Uses @huggingface/transformers with WASM backend for Next.js serverless
  * 
  * IMPORTANT: No external API calls - runs entirely locally using WASM backend
  */
 
-import { pipeline, env } from '@huggingface/transformers';
-
 const MODEL = 'Xenova/bge-small-en-v1.5'; // 384-dim
 const EMBEDDING_DIM = 384;
 
-// Configure environment on module load
-env.allowLocalModels = false;
-env.allowRemoteModels = true;
-env.useBrowserCache = false;
-env.cacheDir = '/tmp/.transformers-cache';
+let pipeline_instance: any = null;
+let isInitializing = false;
+let transformersAvailable: boolean | null = null;
 
-// Force WASM backend
-if (env.backends?.onnx?.wasm) {
-  env.backends.onnx.wasm.proxy = false;
-  env.backends.onnx.wasm.numThreads = 1;
+// Dynamically import and configure transformers
+async function getTransformersModule() {
+  const { pipeline, env } = await import('@huggingface/transformers');
+  
+  // CRITICAL: Force WASM backend FIRST to prevent native library search
+  // This prevents the "libonnxruntime.so.1: cannot open shared object file" error
+  // By prioritizing 'wasm' over 'cpu', we use onnxruntime-web instead of onnxruntime-node
+  if (env.backends?.onnx?.wasm) {
+    env.backends.onnx.wasm.proxy = false;
+    env.backends.onnx.wasm.numThreads = 1;
+    env.backends.onnx.wasm.simd = true;
+  }
+  
+  // Configure environment for WASM backend (no native dependencies needed)
+  env.allowLocalModels = false;
+  env.allowRemoteModels = true;
+  env.useBrowserCache = false;
+  env.cacheDir = '/tmp/.transformers-cache';
+  
+  return { pipeline, env };
 }
 
-console.log('[Crawler Embeddings] Environment configured');
-
-/**
- * Singleton pattern for pipeline instance
- * This is critical for Next.js serverless functions
- */
-class EmbeddingPipeline {
-  static model = MODEL;
-  static instance: any = null;
-  static isInitializing = false;
-
-  static async getInstance() {
-    // Wait if initialization is in progress
-    while (this.isInitializing) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-
-    if (this.instance === null) {
-      try {
-        this.isInitializing = true;
-        console.log(`[Crawler Embeddings] Initializing ${this.model} with WASM backend...`);
-        
-        this.instance = await pipeline('feature-extraction', this.model, {
-          dtype: 'q8', // Quantized for WASM
-        });
-        
-        console.log(`[Crawler Embeddings] ✅ Model ready`);
-      } catch (error) {
-        console.error('[Crawler Embeddings] Failed to initialize:', error);
-        this.instance = null;
-        throw error;
-      } finally {
-        this.isInitializing = false;
-      }
-    }
-
-    return this.instance;
+// Check if transformers is available
+async function checkTransformersAvailability() {
+  // Return cached result if already checked
+  if (transformersAvailable !== null) {
+    return transformersAvailable ? await getTransformersModule() : null;
+  }
+  
+  try {
+    const transformers = await getTransformersModule();
+    transformersAvailable = true;
+    return transformers;
+  } catch (error) {
+    console.error('[Crawler Embeddings] Transformers not available:', error instanceof Error ? error.message : String(error));
+    transformersAvailable = false;
+    return null;
   }
 }
-
-// Use global singleton in development to avoid reinitialization
-let PipelineSingleton: typeof EmbeddingPipeline;
-if (process.env.NODE_ENV !== 'production') {
-  if (!(global as any).EmbeddingPipeline) {
-    (global as any).EmbeddingPipeline = EmbeddingPipeline;
-  }
-  PipelineSingleton = (global as any).EmbeddingPipeline;
-} else {
-  PipelineSingleton = EmbeddingPipeline;
-}
-
-console.log('[Crawler Embeddings] Singleton configured');
 
 /**
  * Generate 384-dim embedding for document chunks
+ * Compatible with main app's query embeddings
+ * 
+ * This function ONLY uses local transformers - no external API calls
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   try {
-    console.log(`[Crawler Embeddings] Generating embedding for: "${text.substring(0, 50)}..."`);
+    // Check if transformers is available
+    const transformers = await checkTransformersAvailability();
+    if (!transformers) {
+      throw new Error('Transformers library not available. Please ensure @huggingface/transformers and its dependencies are properly installed.');
+    }
     
-    // Get singleton instance
-    const extractor = await PipelineSingleton.getInstance();
+    // Initialize model if needed (with proper locking)
+    if (!pipeline_instance) {
+      // Wait if another initialization is in progress
+      while (isInitializing) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      
+      // Double-check after waiting
+      if (!pipeline_instance) {
+        try {
+          isInitializing = true;
+          console.log('[Crawler Embeddings] Initializing bge-small-en-v1.5 (384-dim) with WASM backend...');
+          
+          // CRITICAL: Set backend priority to force WASM usage
+          // This must be done BEFORE pipeline initialization
+          if (transformers.env.backends?.onnx?.wasm) {
+            transformers.env.backends.onnx.wasm.proxy = false;
+          }
+          
+          pipeline_instance = await transformers.pipeline('feature-extraction', MODEL, {
+            dtype: 'q8', // Quantized 8-bit (default for WASM)
+          });
+          
+          console.log('[Crawler Embeddings] ✅ bge-small-en-v1.5 model ready (WASM)');
+        } catch (error) {
+          console.error('[Crawler Embeddings] Failed to initialize model:', error);
+          pipeline_instance = null;
+          throw error;
+        } finally {
+          isInitializing = false;
+        }
+      }
+    }
+    
+    console.log(`[Crawler Embeddings] Generating embedding for: "${text.substring(0, 50)}..."`);
     
     // Add "passage:" prefix for document embeddings (BGE model requirement)
     const prefixedText = `passage: ${text}`;
     
-    const output = await extractor(prefixedText, {
+    const output = await pipeline_instance(prefixedText, {
       pooling: 'mean',
       normalize: true,
     });
@@ -102,7 +119,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
     console.log(`[Crawler Embeddings] ✅ Generated ${embedding.length}-dim embedding`);
     return embedding;
   } catch (error) {
-    console.error('[Crawler Embeddings] Error:', error);
+    console.error('[Crawler Embeddings] Error generating embedding:', error);
     throw new Error(`Failed to generate embedding: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
@@ -133,7 +150,8 @@ export function getModelInfo() {
   return {
     modelName: MODEL,
     embeddingDim: EMBEDDING_DIM,
-    isInitialized: PipelineSingleton.instance !== null,
-    isInitializing: PipelineSingleton.isInitializing,
+    isInitialized: pipeline_instance !== null,
+    isInitializing,
+    transformersAvailable,
   };
 }
