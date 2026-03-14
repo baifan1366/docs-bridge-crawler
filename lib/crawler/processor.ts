@@ -228,27 +228,58 @@ async function updatePageStatus(
 }
 
 async function getOrCreateFolder(supabase: any, sourceName: string): Promise<string> {
-  const { data: existing } = await supabase
+  // First try to get existing folder
+  const { data: existing, error: selectError } = await supabase
     .from('kb_folders')
     .select('id')
     .eq('name', sourceName)
     .eq('folder_type', 'official_gov')
     .single();
 
-  if (existing) return existing.id;
+  if (existing) {
+    console.log(`[FOLDER] Using existing folder: ${sourceName} (${existing.id})`);
+    return existing.id;
+  }
 
-  const { data: newFolder } = await supabase
+  // If not found, try to create
+  console.log(`[FOLDER] Creating new folder: ${sourceName}`);
+  const { data: newFolder, error: insertError } = await supabase
     .from('kb_folders')
     .insert({
       name: sourceName,
       folder_type: 'official_gov',
       is_system: true,
-      is_active: true
+      is_active: true,
+      user_id: null  // System folders have no user
     })
     .select()
     .single();
 
-  return newFolder!.id;
+  if (insertError) {
+    console.error(`[FOLDER] Insert error:`, insertError);
+    
+    // Might be a race condition, try to get again
+    const { data: retryExisting } = await supabase
+      .from('kb_folders')
+      .select('id')
+      .eq('name', sourceName)
+      .eq('folder_type', 'official_gov')
+      .single();
+    
+    if (retryExisting) {
+      console.log(`[FOLDER] Found folder after retry: ${sourceName} (${retryExisting.id})`);
+      return retryExisting.id;
+    }
+    
+    throw new Error(`Failed to get or create folder: ${insertError.message}`);
+  }
+
+  if (!newFolder) {
+    throw new Error(`Failed to create folder: no data returned`);
+  }
+
+  console.log(`[FOLDER] Created new folder: ${sourceName} (${newFolder.id})`);
+  return newFolder.id;
 }
 
 function detectPageType(title: string, text: string): string {
