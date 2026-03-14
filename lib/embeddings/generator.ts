@@ -16,20 +16,14 @@ let transformersAvailable: boolean | null = null;
 async function getTransformersModule() {
   const { pipeline, env } = await import('@huggingface/transformers');
   
-  // CRITICAL: Force WASM backend FIRST to prevent native library search
-  // This prevents the "libonnxruntime.so.1: cannot open shared object file" error
-  // By prioritizing 'wasm' over 'cpu', we use onnxruntime-web instead of onnxruntime-node
-  if (env.backends?.onnx?.wasm) {
-    env.backends.onnx.wasm.proxy = false;
-    env.backends.onnx.wasm.numThreads = 1;
-    env.backends.onnx.wasm.simd = true;
-  }
-  
-  // Configure environment for WASM backend (no native dependencies needed)
+  // Configure environment for serverless (Vercel) - following official docs
   env.allowLocalModels = false;
   env.allowRemoteModels = true;
   env.useBrowserCache = false;
   env.cacheDir = '/tmp/.transformers-cache';
+  
+  // WASM backend is automatically used in Node.js environment
+  // No need to manually configure backends - transformers.js handles this
   
   return { pipeline, env };
 }
@@ -77,19 +71,14 @@ export async function generateEmbedding(text: string): Promise<number[]> {
       if (!pipeline_instance) {
         try {
           isInitializing = true;
-          console.log('[Crawler Embeddings] Initializing bge-small-en-v1.5 (384-dim) with WASM backend...');
+          console.log('[Crawler Embeddings] Initializing bge-small-en-v1.5 (384-dim)...');
           
-          // CRITICAL: Set backend priority to force WASM usage
-          // This must be done BEFORE pipeline initialization
-          if (transformers.env.backends?.onnx?.wasm) {
-            transformers.env.backends.onnx.wasm.proxy = false;
-          }
-          
+          // Initialize pipeline - transformers.js automatically uses WASM in Node.js
           pipeline_instance = await transformers.pipeline('feature-extraction', MODEL, {
-            dtype: 'q8', // Quantized 8-bit (default for WASM)
+            dtype: 'q8', // Quantized 8-bit for efficiency
           });
           
-          console.log('[Crawler Embeddings] ✅ bge-small-en-v1.5 model ready (WASM)');
+          console.log('[Crawler Embeddings] ✅ bge-small-en-v1.5 model ready');
         } catch (error) {
           console.error('[Crawler Embeddings] Failed to initialize model:', error);
           pipeline_instance = null;
