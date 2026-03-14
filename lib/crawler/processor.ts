@@ -49,7 +49,19 @@ export async function processPage(url: string, sourceId: string) {
     if (fetchResult.status === 'error' || !fetchResult.html) {
       const errorMsg = fetchResult.errorMessage || 'Unknown fetch error';
       console.error(`[ERROR] Fetch failed: ${url} - ${errorMsg}`);
-      await updatePageStatus(supabase, url, 'failed', errorMsg);
+      
+      // Record the failed page
+      await supabase
+        .from('crawler_pages')
+        .upsert({
+          source_id: sourceId,
+          url,
+          url_hash: createHash('sha256').update(url).digest('hex'),
+          last_crawled_at: new Date().toISOString(),
+          crawl_status: 'failed',
+          error_message: errorMsg
+        }, { onConflict: 'url' });
+      
       return { status: 'failed', reason: 'fetch-error', error: errorMsg };
     }
 

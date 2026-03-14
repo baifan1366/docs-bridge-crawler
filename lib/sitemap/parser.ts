@@ -88,7 +88,7 @@ export async function getUpdatedUrls(
     
     const { data, error } = await supabase
       .from('crawler_pages')
-      .select('url, sitemap_lastmod')
+      .select('url, sitemap_lastmod, crawl_status, last_crawled_at')
       .eq('source_id', sourceId)
       .in('url', batch);
 
@@ -105,26 +105,49 @@ export async function getUpdatedUrls(
   console.log(`[SITEMAP] DB query completed in ${Date.now() - dbStart}ms, found ${allExistingPages.length} existing pages`);
 
   // Create a map for quick lookup
-  const existingMap = new Map<string, string | null>(
-    allExistingPages.map((p: any) => [p.url, p.sitemap_lastmod])
+  const existingMap = new Map<string, { lastmod: string | null, status: string, lastCrawled: string }>(
+    allExistingPages.map((p: any) => [p.url, { 
+      lastmod: p.sitemap_lastmod, 
+      status: p.crawl_status,
+      lastCrawled: p.last_crawled_at
+    }])
   );
 
   const updatedUrls: string[] = [];
   let newPages = 0;
   let updatedPages = 0;
   let unchangedPages = 0;
+  let skippedFailedPages = 0;
+
+  // Skip pages that failed in the last 24 hours
+  const RETRY_AFTER_HOURS = 24;
+  const retryAfterMs = RETRY_AFTER_HOURS * 60 * 60 * 1000;
 
   for (const entry of entries) {
-    const existingLastmod = existingMap.get(entry.url);
+    const existing = existingMap.get(entry.url);
 
-    if (existingLastmod === undefined) {
+    if (!existing) {
       // New page
       updatedUrls.push(entry.url);
       newPages++;
-    } else if (entry.lastmod && existingLastmod) {
+    } else if (existing.status === 'failed') {
+      // Check if we should retry failed pages
+      const lastCrawledTime = new Date(existing.lastCrawled).getTime();
+      const now = Date.now();
+      
+      if (now - lastCrawledTime < retryAfterMs) {
+        // Skip recently failed pages
+        skippedFailedPages++;
+        continue;
+      } else {
+        // Retry after cooldown period
+        updatedUrls.push(entry.url);
+        updatedPages++;
+      }
+    } else if (entry.lastmod && existing.lastmod) {
       // Compare lastmod dates
       const sitemapDate = new Date(entry.lastmod);
-      const existingDate = new Date(existingLastmod);
+      const existingDate = new Date(existing.lastmod);
       
       if (sitemapDate > existingDate) {
         updatedUrls.push(entry.url);
@@ -144,6 +167,7 @@ export async function getUpdatedUrls(
   console.log(`[SITEMAP]   - New pages: ${newPages}`);
   console.log(`[SITEMAP]   - Updated pages: ${updatedPages}`);
   console.log(`[SITEMAP]   - Unchanged pages: ${unchangedPages}`);
+  console.log(`[SITEMAP]   - Skipped failed pages (retry after ${RETRY_AFTER_HOURS}h): ${skippedFailedPages}`);
   console.log(`[SITEMAP]   - Total to crawl: ${updatedUrls.length}`);
 
   return updatedUrls;
