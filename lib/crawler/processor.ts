@@ -48,7 +48,8 @@ export async function processPage(url: string, sourceId: string) {
 
     if (fetchResult.status === 'error' || !fetchResult.html) {
       console.error(`[ERROR] Fetch failed: ${url}`);
-      await updatePageStatus(supabase, url, 'failed');
+      console.error(`[ERROR] Fetch status: ${fetchResult.status}, has HTML: ${!!fetchResult.html}`);
+      await updatePageStatus(supabase, url, 'failed', 'Fetch error');
       return { status: 'failed', reason: 'fetch-error' };
     }
 

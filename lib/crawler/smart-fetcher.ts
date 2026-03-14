@@ -39,7 +39,12 @@ export async function smartFetch(
   }
 
   try {
-    const response = await fetch(url, { headers });
+    const response = await fetch(url, { 
+      headers,
+      signal: AbortSignal.timeout(30000) // 30 second timeout
+    });
+
+    console.log(`[FETCH] ${url} - Status: ${response.status}`);
 
     // 304 Not Modified
     if (response.status === 304) {
@@ -49,6 +54,7 @@ export async function smartFetch(
     // 200 OK
     if (response.status === 200) {
       const html = await response.text();
+      console.log(`[FETCH] ${url} - Downloaded ${html.length} bytes`);
       return {
         html,
         status: 'modified',
@@ -57,9 +63,11 @@ export async function smartFetch(
       };
     }
 
+    // Other status codes
+    console.error(`[FETCH] ${url} - Unexpected status: ${response.status}`);
     return { status: 'error' };
   } catch (error) {
-    console.error(`Fetch error for ${url}:`, error);
+    console.error(`[FETCH] ${url} - Error:`, error instanceof Error ? error.message : error);
     return { status: 'error' };
   }
 }
