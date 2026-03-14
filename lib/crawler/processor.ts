@@ -47,10 +47,10 @@ export async function processPage(url: string, sourceId: string) {
     }
 
     if (fetchResult.status === 'error' || !fetchResult.html) {
-      console.error(`[ERROR] Fetch failed: ${url}`);
-      console.error(`[ERROR] Fetch status: ${fetchResult.status}, has HTML: ${!!fetchResult.html}`);
-      await updatePageStatus(supabase, url, 'failed', 'Fetch error');
-      return { status: 'failed', reason: 'fetch-error' };
+      const errorMsg = fetchResult.errorMessage || 'Unknown fetch error';
+      console.error(`[ERROR] Fetch failed: ${url} - ${errorMsg}`);
+      await updatePageStatus(supabase, url, 'failed', errorMsg);
+      return { status: 'failed', reason: 'fetch-error', error: errorMsg };
     }
 
     // 4. Content Hash check
