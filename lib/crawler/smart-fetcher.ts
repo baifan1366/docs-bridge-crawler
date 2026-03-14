@@ -31,6 +31,11 @@ export async function smartFetch(
     last_modified_header?: string;
   }
 ): Promise<FetchResult> {
+  // Add random delay before fetching (1-3 seconds) to appear more human-like
+  const randomDelay = 1000 + Math.floor(Math.random() * 2000);
+  console.log(`[FETCH] Waiting ${randomDelay}ms before fetching ${url}`);
+  await delay(randomDelay);
+
   const headers: Record<string, string> = {
     'User-Agent': getRandomUserAgent(),
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -53,19 +58,22 @@ export async function smartFetch(
   }
 
   // Retry logic
-  const MAX_RETRIES = 2;
+  const MAX_RETRIES = 3; // Increased from 2 to 3
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       if (attempt > 1) {
-        const backoffDelay = attempt * 2000; // 2s, 4s
+        // Exponential backoff with jitter: 5s, 10s, 20s
+        const baseDelay = attempt * 5000;
+        const jitter = Math.floor(Math.random() * 2000);
+        const backoffDelay = baseDelay + jitter;
         console.log(`[FETCH] Retry ${attempt}/${MAX_RETRIES} for ${url} after ${backoffDelay}ms`);
         await delay(backoffDelay);
       }
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+      const timeoutId = setTimeout(() => controller.abort(), 90000); // Increased to 90 seconds
 
       const response = await fetch(url, { 
         headers,
@@ -74,7 +82,7 @@ export async function smartFetch(
 
       clearTimeout(timeoutId);
 
-      console.log(`[FETCH] ${url} - Status: ${response.status}`);
+      console.log(`[FETCH] ${url} - Status: ${response.status} (Attempt ${attempt}/${MAX_RETRIES})`);
 
       // 304 Not Modified
       if (response.status === 304) {
@@ -93,20 +101,42 @@ export async function smartFetch(
         };
       }
 
-      // Other status codes
-      console.error(`[FETCH] ${url} - Unexpected status: ${response.status}`);
-      lastError = new Error(`HTTP ${response.status}`);
-      
-      // Don't retry on 4xx errors (client errors)
+      // 429 Too Many Requests - wait longer
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('retry-after');
+        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : 30000;
+        console.log(`[FETCH] ${url} - Rate limited, waiting ${waitTime}ms`);
+        if (attempt < MAX_RETRIES) {
+          await delay(waitTime);
+          continue;
+        }
+      }
+
+      // 5xx Server errors - retry with longer backoff
+      if (response.status >= 500) {
+        console.error(`[FETCH] ${url} - Server error: ${response.status}`);
+        lastError = new Error(`HTTP ${response.status}`);
+        if (attempt < MAX_RETRIES) {
+          continue;
+        }
+      }
+
+      // 4xx Client errors - don't retry
       if (response.status >= 400 && response.status < 500) {
+        console.error(`[FETCH] ${url} - Client error: ${response.status}`);
         return { 
           status: 'error',
           errorMessage: `HTTP ${response.status}`
         };
       }
+
+      // Other unexpected status codes
+      console.error(`[FETCH] ${url} - Unexpected status: ${response.status}`);
+      lastError = new Error(`HTTP ${response.status}`);
       
-      // Retry on 5xx errors
-      continue;
+      if (attempt < MAX_RETRIES) {
+        continue;
+      }
 
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -114,15 +144,13 @@ export async function smartFetch(
       
       console.error(`[FETCH] ${url} - Attempt ${attempt}/${MAX_RETRIES} failed:`, errorMsg);
       
-      // Don't retry on abort/timeout for now, just fail
-      if (errorMsg.includes('aborted') || errorMsg.includes('timeout')) {
-        return { 
-          status: 'error',
-          errorMessage: errorMsg
-        };
+      // For timeout/abort, retry with longer timeout
+      if ((errorMsg.includes('aborted') || errorMsg.includes('timeout')) && attempt < MAX_RETRIES) {
+        console.log(`[FETCH] ${url} - Timeout, will retry with longer timeout`);
+        continue;
       }
       
-      // Retry on network errors
+      // For network errors, retry
       if (attempt < MAX_RETRIES) {
         continue;
       }

@@ -71,11 +71,12 @@ export async function enqueueCrawlWithFlowControl(
     // @ts-ignore - flowControl is not in types yet
     flowControl: {
       key: domain,
-      parallelism: 1,
-      rate: 60,
-      period: 60
+      parallelism: 1,  // Only 1 concurrent request per domain
+      rate: 10,         // 10 requests per period (reduced from 60)
+      period: 60        // per 60 seconds
     },
-    retries: 3
+    retries: 3,
+    delay: Math.floor(Math.random() * 5) // Random delay 0-5 seconds
   });
 
   return result;
