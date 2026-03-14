@@ -86,8 +86,8 @@ export async function getUpdatedUrls(
   console.log(`[SITEMAP] DB query completed in ${Date.now() - dbStart}ms, found ${existingPages?.length || 0} existing pages`);
 
   // Create a map for quick lookup
-  const existingMap = new Map(
-    (existingPages || []).map(p => [p.url, p.sitemap_lastmod])
+  const existingMap = new Map<string, string | null>(
+    (existingPages || []).map((p: any) => [p.url, p.sitemap_lastmod])
   );
 
   const updatedUrls: string[] = [];
@@ -98,11 +98,11 @@ export async function getUpdatedUrls(
   for (const entry of entries) {
     const existingLastmod = existingMap.get(entry.url);
 
-    if (!existingLastmod) {
+    if (existingLastmod === undefined) {
       // New page
       updatedUrls.push(entry.url);
       newPages++;
-    } else if (entry.lastmod) {
+    } else if (entry.lastmod && existingLastmod) {
       // Compare lastmod dates
       const sitemapDate = new Date(entry.lastmod);
       const existingDate = new Date(existingLastmod);
