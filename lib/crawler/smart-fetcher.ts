@@ -83,6 +83,13 @@ export async function smartFetch(
       clearTimeout(timeoutId);
 
       console.log(`[FETCH] ${url} - Status: ${response.status} (Attempt ${attempt}/${MAX_RETRIES})`);
+      console.log(`[FETCH] ${url} - Response headers:`, {
+        'content-type': response.headers.get('content-type'),
+        'content-length': response.headers.get('content-length'),
+        'server': response.headers.get('server'),
+        'x-powered-by': response.headers.get('x-powered-by'),
+        'cache-control': response.headers.get('cache-control')
+      });
 
       // 304 Not Modified
       if (response.status === 304) {
@@ -112,9 +119,24 @@ export async function smartFetch(
         }
       }
 
-      // 5xx Server errors - retry with longer backoff
+      // 5xx Server errors - try to get error body
       if (response.status >= 500) {
         console.error(`[FETCH] ${url} - Server error: ${response.status}`);
+        
+        // Try to read error response body
+        try {
+          const errorText = await response.text();
+          const preview = errorText.substring(0, 500);
+          console.error(`[FETCH] ${url} - Error body preview:`, preview);
+          
+          // Check if it's HTML error page
+          if (errorText.includes('<html') || errorText.includes('<!DOCTYPE')) {
+            console.error(`[FETCH] ${url} - Received HTML error page`);
+          }
+        } catch (e) {
+          console.error(`[FETCH] ${url} - Could not read error body`);
+        }
+        
         lastError = new Error(`HTTP ${response.status}`);
         if (attempt < MAX_RETRIES) {
           continue;

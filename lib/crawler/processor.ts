@@ -14,30 +14,47 @@ import * as cheerio from 'cheerio';
 
 export async function processPage(url: string, sourceId: string) {
   console.log(`[START] Processing: ${url}`);
+  console.log(`[INFO] Source ID: ${sourceId}`);
   const startTime = Date.now();
   
   const supabase = await createClient();
 
   try {
     // 1. Get source config
-    const { data: source } = await supabase
+    console.log(`[STEP 1] Fetching source config...`);
+    const { data: source, error: sourceError } = await supabase
       .from('crawler_sources')
       .select('*')
       .eq('id', sourceId)
       .single();
 
+    if (sourceError) {
+      console.error(`[ERROR] Failed to fetch source:`, sourceError);
+      throw new Error(`Source fetch error: ${sourceError.message}`);
+    }
+
     if (!source) {
       throw new Error(`Source not found: ${sourceId}`);
     }
 
+    console.log(`[STEP 1] Source found: ${source.name}`);
+
     // 2. Get existing page data
+    console.log(`[STEP 2] Checking for existing page...`);
     const { data: existingPage } = await supabase
       .from('crawler_pages')
       .select('*')
       .eq('url', url)
       .single();
 
+    if (existingPage) {
+      console.log(`[STEP 2] Found existing page, last crawled: ${existingPage.last_crawled_at}`);
+    } else {
+      console.log(`[STEP 2] No existing page found`);
+    }
+
     // 3. Smart Fetch (If-Modified-Since + ETag)
+    console.log(`[STEP 3] Starting smart fetch...`);
     const fetchResult = await smartFetch(url, existingPage);
 
     if (fetchResult.status === 'not-modified') {
@@ -51,7 +68,8 @@ export async function processPage(url: string, sourceId: string) {
       console.error(`[ERROR] Fetch failed: ${url} - ${errorMsg}`);
       
       // Record the failed page
-      await supabase
+      console.log(`[STEP 3.1] Recording failed page...`);
+      const { error: pageInsertError } = await supabase
         .from('crawler_pages')
         .upsert({
           source_id: sourceId,
@@ -62,10 +80,17 @@ export async function processPage(url: string, sourceId: string) {
           error_message: errorMsg
         }, { onConflict: 'url' });
       
+      if (pageInsertError) {
+        console.error(`[ERROR] Failed to record failed page:`, pageInsertError);
+      } else {
+        console.log(`[STEP 3.1] Failed page recorded`);
+      }
+      
       return { status: 'failed', reason: 'fetch-error', error: errorMsg };
     }
 
     // 4. Content Hash check
+    console.log(`[STEP 4] Checking content hash...`);
     const html = fetchResult.html;
     const contentHash = createHash('sha256').update(html).digest('hex');
 
@@ -75,17 +100,20 @@ export async function processPage(url: string, sourceId: string) {
       return { status: 'skipped', reason: 'content-unchanged' };
     }
 
-    console.log(`[PROCESS] Content changed: ${url}`);
+    console.log(`[PROCESS] Content changed or new page: ${url}`);
 
     // 5. HTML Cleaning
+    console.log(`[STEP 5] Cleaning HTML...`);
     const $ = cheerio.load(html);
     $('script, style, nav, footer, header, .ads').remove();
     const text = $('body').text().replace(/\s+/g, ' ').trim();
     const title = $('title').text() || $('h1').first().text();
     const language = $('html').attr('lang') || 'en';
+    console.log(`[STEP 5] Extracted - Title: "${title}", Language: ${language}, Text length: ${text.length}`);
 
     // 6. Update page record
-    const { data: page } = await supabase
+    console.log(`[STEP 6] Creating/updating page record...`);
+    const { data: page, error: pageError } = await supabase
       .from('crawler_pages')
       .upsert({
         source_id: sourceId,
@@ -105,11 +133,24 @@ export async function processPage(url: string, sourceId: string) {
       .select()
       .single();
 
+    if (pageError || !page) {
+      console.error(`[ERROR] Failed to upsert page:`, pageError);
+      throw new Error(`Failed to create/update page record: ${pageError?.message || 'No data returned'}`);
+    }
+
+    console.log(`[PAGE] Created/updated page record: ${page.id}`);
+
     // 7. Create/update document
-    const { data: document } = await supabase
+    console.log(`[STEP 7] Getting or creating folder...`);
+    const folderId = await getOrCreateFolder(supabase, source.name);
+    console.log(`[DOCUMENT] Using folder: ${folderId}`);
+    
+    console.log(`[STEP 7] Creating/updating document...`);
+    const { data: document, error: docError } = await supabase
       .from('kb_documents')
       .upsert({
-        folder_id: await getOrCreateFolder(supabase, source.name),
+        folder_id: folderId,
+        user_id: null,  // Gov crawled documents have no user
         title,
         content: text,
         raw_content: html,
@@ -127,10 +168,19 @@ export async function processPage(url: string, sourceId: string) {
       .select()
       .single();
 
-    // 8. Rule-Based Extraction
-    const extracted = extractWithRules(html, text);
+    if (docError || !document) {
+      console.error(`[ERROR] Failed to upsert document:`, docError);
+      throw new Error(`Failed to create/update document: ${docError?.message || 'No data returned'}`);
+    }
 
-    await supabase
+    console.log(`[DOCUMENT] Created/updated document: ${document.id}`);
+
+    // 8. Rule-Based Extraction
+    console.log(`[STEP 8] Extracting structured data...`);
+    const extracted = extractWithRules(html, text);
+    console.log(`[STEP 8] Extraction complete - Method: ${extracted.extraction_method}, Confidence: ${extracted.confidence}`);
+
+    const { error: structuredError } = await supabase
       .from('document_structured_data')
       .upsert({
         document_id: document.id,
@@ -138,7 +188,14 @@ export async function processPage(url: string, sourceId: string) {
         ...extracted
       }, { onConflict: 'document_id' });
 
+    if (structuredError) {
+      console.error(`[WARNING] Failed to save structured data:`, structuredError);
+    } else {
+      console.log(`[STEP 8] Structured data saved`);
+    }
+
     // 9. Section-Aware Chunking
+    console.log(`[STEP 9] Chunking content...`);
     let chunks = chunkBySections(html);
     
     if (chunks.length === 0) {
@@ -149,18 +206,30 @@ export async function processPage(url: string, sourceId: string) {
     console.log(`[CHUNKS] Created ${chunks.length} chunks`);
 
     // 10. Delete old chunks
-    await supabase
+    console.log(`[STEP 10] Deleting old chunks...`);
+    const { error: deleteError } = await supabase
       .from('document_chunks')
       .delete()
       .eq('document_id', document.id);
 
+    if (deleteError) {
+      console.error(`[WARNING] Failed to delete old chunks:`, deleteError);
+    } else {
+      console.log(`[STEP 10] Old chunks deleted`);
+    }
+
     // 11. Generate embeddings and store
+    console.log(`[STEP 11] Generating embeddings and storing chunks...`);
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
       
+      if (i % 10 === 0) {
+        console.log(`[STEP 11] Processing chunk ${i + 1}/${chunks.length}...`);
+      }
+      
       const embedding = await generateEmbedding(chunk.text);
 
-      await supabase
+      const { error: chunkError } = await supabase
         .from('document_chunks')
         .insert({
           document_id: document.id,
@@ -178,6 +247,11 @@ export async function processPage(url: string, sourceId: string) {
             position: i === 0 ? 'start' : i === chunks.length - 1 ? 'end' : 'middle'
           }
         });
+
+      if (chunkError) {
+        console.error(`[ERROR] Failed to insert chunk ${i}:`, chunkError);
+        throw chunkError;
+      }
     }
 
     console.log(`[SUCCESS] Completed: ${url} (${chunks.length} chunks)`);
@@ -185,6 +259,7 @@ export async function processPage(url: string, sourceId: string) {
     const duration = Date.now() - startTime;
 
     // Log metrics
+    console.log(`[STEP 12] Logging metrics...`);
     await logCrawlMetrics({
       url,
       status: 'success',
@@ -193,6 +268,8 @@ export async function processPage(url: string, sourceId: string) {
       extraction_method: extracted.extraction_method,
       extraction_confidence: extracted.confidence
     });
+
+    console.log(`[COMPLETE] Total processing time: ${duration}ms`);
 
     return {
       status: 'success',
@@ -205,6 +282,7 @@ export async function processPage(url: string, sourceId: string) {
 
   } catch (error: any) {
     console.error(`[ERROR] Processing failed for ${url}:`, error);
+    console.error(`[ERROR] Error stack:`, error.stack);
     await updatePageStatus(supabase, url, 'failed', error.message);
     
     const duration = Date.now() - startTime;

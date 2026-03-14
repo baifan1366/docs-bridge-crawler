@@ -72,11 +72,11 @@ export async function enqueueCrawlWithFlowControl(
     flowControl: {
       key: domain,
       parallelism: 1,  // Only 1 concurrent request per domain
-      rate: 10,         // 10 requests per period (reduced from 60)
-      period: 60        // per 60 seconds
+      rate: 5,          // 5 requests per period (very conservative)
+      period: 60        // per 60 seconds = 1 request every 12 seconds
     },
-    retries: 3,
-    delay: Math.floor(Math.random() * 5) // Random delay 0-5 seconds
+    retries: 2,         // Reduced retries to avoid wasting time
+    delay: Math.floor(Math.random() * 10) // Random delay 0-10 seconds
   });
 
   return result;
