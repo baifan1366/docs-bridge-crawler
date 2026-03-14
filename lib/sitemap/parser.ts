@@ -72,22 +72,41 @@ export async function getUpdatedUrls(
   const urls = entries.map(e => e.url);
   console.log(`[SITEMAP] Fetching existing pages from DB for ${urls.length} URLs...`);
   
-  const { data: existingPages, error } = await supabase
-    .from('crawler_pages')
-    .select('url, sitemap_lastmod')
-    .eq('source_id', sourceId)
-    .in('url', urls);
+  // Split into batches to avoid query size limits (max 100 per batch)
+  const BATCH_SIZE = 100;
+  const batches = [];
+  for (let i = 0; i < urls.length; i += BATCH_SIZE) {
+    batches.push(urls.slice(i, i + BATCH_SIZE));
+  }
+  
+  console.log(`[SITEMAP] Querying in ${batches.length} batches...`);
+  
+  let allExistingPages: any[] = [];
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    console.log(`[SITEMAP] Fetching batch ${i + 1}/${batches.length} (${batch.length} URLs)...`);
+    
+    const { data, error } = await supabase
+      .from('crawler_pages')
+      .select('url, sitemap_lastmod')
+      .eq('source_id', sourceId)
+      .in('url', batch);
 
-  if (error) {
-    console.error('[SITEMAP] Error fetching existing pages:', error);
-    throw error;
+    if (error) {
+      console.error(`[SITEMAP] Error fetching batch ${i + 1}:`, error);
+      throw error;
+    }
+    
+    if (data) {
+      allExistingPages = allExistingPages.concat(data);
+    }
   }
 
-  console.log(`[SITEMAP] DB query completed in ${Date.now() - dbStart}ms, found ${existingPages?.length || 0} existing pages`);
+  console.log(`[SITEMAP] DB query completed in ${Date.now() - dbStart}ms, found ${allExistingPages.length} existing pages`);
 
   // Create a map for quick lookup
   const existingMap = new Map<string, string | null>(
-    (existingPages || []).map((p: any) => [p.url, p.sitemap_lastmod])
+    allExistingPages.map((p: any) => [p.url, p.sitemap_lastmod])
   );
 
   const updatedUrls: string[] = [];
