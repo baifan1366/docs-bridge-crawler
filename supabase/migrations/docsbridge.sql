@@ -233,7 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_kb_documents_user_id ON public.kb_documents(user_
 CREATE INDEX IF NOT EXISTS idx_kb_documents_document_type ON public.kb_documents(document_type);
 CREATE INDEX IF NOT EXISTS idx_kb_documents_content_hash ON public.kb_documents(content_hash);
 CREATE INDEX IF NOT EXISTS idx_kb_documents_last_crawled_at ON public.kb_documents(last_crawled_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_documents_source_url_unique ON public.kb_documents(source_url) WHERE source_url IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_kb_documents_source_url ON public.kb_documents(source_url) WHERE source_url IS NOT NULL;
 
 -- KB Attachments Indexes
 CREATE INDEX IF NOT EXISTS idx_kb_attachments_document_id ON public.kb_attachments(document_id);

@@ -146,30 +146,99 @@ export async function processPage(url: string, sourceId: string) {
     console.log(`[DOCUMENT] Using folder: ${folderId}`);
     
     console.log(`[STEP 7] Creating/updating document...`);
-    const { data: document, error: docError } = await supabase
+    console.log(`[DEBUG] Document data:`, {
+      folder_id: folderId,
+      title,
+      source_url: url,
+      content_length: text.length,
+      content_hash: contentHash,
+      document_type: 'gov_crawled',
+      language
+    });
+    
+    // Check if document exists with same source_url and content_hash
+    // We use content_hash to identify if it's the same content
+    const { data: existingDocs } = await supabase
       .from('kb_documents')
-      .upsert({
-        folder_id: folderId,
-        user_id: null,  // Gov crawled documents have no user
-        title,
-        content: text,
-        raw_content: html,
-        content_hash: contentHash,
-        document_type: 'gov_crawled',
-        source_url: url,
-        language,
-        trust_level: source.metadata?.trust_level || 1.0,
-        last_crawled_at: new Date().toISOString(),
-        metadata: {
-          ...source.metadata,
-          page_type: detectPageType(title, text)
-        }
-      }, { onConflict: 'source_url' })
-      .select()
-      .single();
+      .select('id, content_hash')
+      .eq('source_url', url)
+      .eq('document_type', 'gov_crawled');
+    
+    console.log(`[DEBUG] Found ${existingDocs?.length || 0} existing documents for this URL`);
+    
+    // Find document with matching content_hash (same content)
+    const existingDoc = existingDocs?.find(doc => doc.content_hash === contentHash);
+    
+    let document;
+    let docError;
+    
+    if (existingDoc) {
+      // Update existing document with same content
+      console.log(`[DEBUG] Updating existing document: ${existingDoc.id}`);
+      const result = await supabase
+        .from('kb_documents')
+        .update({
+          folder_id: folderId,
+          title,
+          content: text,
+          raw_content: html,
+          content_hash: contentHash,
+          language,
+          trust_level: source.metadata?.trust_level || 1.0,
+          last_crawled_at: new Date().toISOString(),
+          metadata: {
+            ...source.metadata,
+            page_type: detectPageType(title, text)
+          }
+        })
+        .eq('id', existingDoc.id)
+        .select()
+        .single();
+      
+      document = result.data;
+      docError = result.error;
+    } else {
+      // Insert new document (either first time or content changed significantly)
+      console.log(`[DEBUG] Inserting new document`);
+      const result = await supabase
+        .from('kb_documents')
+        .insert({
+          folder_id: folderId,
+          user_id: null,
+          title,
+          content: text,
+          raw_content: html,
+          content_hash: contentHash,
+          document_type: 'gov_crawled',
+          source_url: url,
+          language,
+          trust_level: source.metadata?.trust_level || 1.0,
+          last_crawled_at: new Date().toISOString(),
+          metadata: {
+            ...source.metadata,
+            page_type: detectPageType(title, text)
+          }
+        })
+        .select()
+        .single();
+      
+      document = result.data;
+      docError = result.error;
+      
+      // If we inserted a new document but there were old ones, optionally clean up old versions
+      if (!docError && existingDocs && existingDocs.length > 0) {
+        console.log(`[DEBUG] Cleaning up ${existingDocs.length} old document versions`);
+        const oldDocIds = existingDocs.map(d => d.id);
+        await supabase
+          .from('kb_documents')
+          .delete()
+          .in('id', oldDocIds);
+      }
+    }
 
     if (docError || !document) {
-      console.error(`[ERROR] Failed to upsert document:`, docError);
+      console.error(`[ERROR] Failed to save document:`, docError);
+      console.error(`[ERROR] Error details:`, JSON.stringify(docError, null, 2));
       throw new Error(`Failed to create/update document: ${docError?.message || 'No data returned'}`);
     }
 
