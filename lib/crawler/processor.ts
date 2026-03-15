@@ -7,7 +7,7 @@ import { createClient } from '../supabase/server';
 import { smartFetch } from './smart-fetcher';
 import { chunkBySections, fallbackChunking } from '../processing/section-chunker';
 import { extractWithRules } from '../processing/rule-extractor';
-import { generateEmbedding } from '../embeddings/generator';
+import { generateDualEmbeddings } from '../embeddings/generator';
 import { logCrawlMetrics } from '../monitoring/metrics';
 import { createHash } from 'crypto';
 import * as cheerio from 'cheerio';
@@ -296,7 +296,7 @@ export async function processPage(url: string, sourceId: string) {
         console.log(`[STEP 11] Processing chunk ${i + 1}/${chunks.length}...`);
       }
       
-      const embedding = await generateEmbedding(chunk.text);
+      const embeddings = await generateDualEmbeddings(chunk.text);
 
       const { error: chunkError } = await supabase
         .from('document_chunks')
@@ -306,7 +306,8 @@ export async function processPage(url: string, sourceId: string) {
           chunk_text: chunk.text,
           chunk_index: i,
           chunk_hash: createHash('sha256').update(chunk.text).digest('hex'),
-          embedding_large: embedding,
+          embedding_small: embeddings.small,  // 384-dim from e5-small
+          embedding_large: embeddings.large,  // 1024-dim from bge-m3
           token_count: chunk.tokenCount,
           section_heading: chunk.heading,
           section_level: chunk.level,

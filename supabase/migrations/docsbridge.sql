@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS public.document_chunks (
   document_id UUID NOT NULL REFERENCES public.kb_documents(id) ON DELETE CASCADE,
   chunk_text TEXT NOT NULL,
   chunk_index INT NOT NULL,
+  chunk_hash TEXT,
   embedding_small vector(384),
   embedding_large vector(1024),
   token_count INT,
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS public.document_chunks (
   section_level INTEGER,
   is_section_chunk BOOLEAN DEFAULT false,
   last_rerank_score NUMERIC,
+  metadata JSONB DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(document_id, chunk_index)
