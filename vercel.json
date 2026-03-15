@@ -5,15 +5,5 @@
       "path": "/api/cron/check-updates",
       "schedule": "0 0 * * 0"
     }
-  ],
-  "functions": {
-    "app/api/webhook/route.ts": {
-      "maxDuration": 300,
-      "memory": 3008
-    },
-    "app/api/cron/check-updates/route.ts": {
-      "maxDuration": 300,
-      "memory": 3008
-    }
-  }
+  ]
 }

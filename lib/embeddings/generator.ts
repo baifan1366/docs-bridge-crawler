@@ -1,72 +1,44 @@
 /**
  * Embedding generation for crawler service
- * Uses @huggingface/transformers with WASM backend for Next.js serverless
+ * Uses Hugging Face Space API with multilingual-e5-small model
  * 
- * IMPORTANT: No external API calls - runs entirely locally using WASM backend
+ * Model: intfloat/multilingual-e5-small (384-dim)
+ * Task: passage (for document/chunk embeddings)
  */
 
-import { pipeline, env } from '@huggingface/transformers';
-
-// Configure transformers.js environment for Vercel serverless
-env.allowLocalModels = false;
-env.allowRemoteModels = true;
-env.useBrowserCache = false;
-env.cacheDir = '/tmp/.transformers-cache';
-
-const MODEL = 'Xenova/bge-small-en-v1.5'; // 384-dim
+const E5_API_URL = process.env.E5_HG_EMBEDDING_SERVER_API_URL || 'https://edusocial-e5-small-embedding-server.hf.space';
 const EMBEDDING_DIM = 384;
 
-let pipeline_instance: any = null;
-let isInitializing = false;
-
 /**
- * Generate 384-dim embedding for document chunks
- * Compatible with main app's query embeddings
- * 
- * This function ONLY uses local transformers - no external API calls
+ * Generate 384-dim embedding for document chunks using E5 API
+ * Automatically adds "passage: " prefix for document embeddings
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   try {
-    // Initialize model if needed (with proper locking)
-    if (!pipeline_instance) {
-      // Wait if another initialization is in progress
-      while (isInitializing) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      
-      // Double-check after waiting
-      if (!pipeline_instance) {
-        try {
-          isInitializing = true;
-          console.log('[Crawler Embeddings] Initializing bge-small-en-v1.5 (384-dim)...');
-          
-          // Initialize pipeline - transformers.js automatically uses WASM in Node.js
-          pipeline_instance = await pipeline('feature-extraction', MODEL, {
-            dtype: 'q8', // Quantized 8-bit for efficiency
-          });
-          
-          console.log('[Crawler Embeddings] ✅ bge-small-en-v1.5 model ready');
-        } catch (error) {
-          console.error('[Crawler Embeddings] Failed to initialize model:', error);
-          pipeline_instance = null;
-          throw error;
-        } finally {
-          isInitializing = false;
-        }
-      }
-    }
-    
     console.log(`[Crawler Embeddings] Generating embedding for: "${text.substring(0, 50)}..."`);
     
-    // Add "passage:" prefix for document embeddings (BGE model requirement)
-    const prefixedText = `passage: ${text}`;
-    
-    const output = await pipeline_instance(prefixedText, {
-      pooling: 'mean',
-      normalize: true,
+    const response = await fetch(`${E5_API_URL}/embed`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        input: text,
+        task: 'passage', // Document/passage embeddings
+      }),
     });
     
-    const embedding = Array.from(output.data) as number[];
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`E5 API error (${response.status}): ${errorText}`);
+    }
+    
+    const data = await response.json();
+    const embedding = data.embedding as number[];
+    
+    if (!embedding || !Array.isArray(embedding)) {
+      throw new Error('Invalid response format from E5 API');
+    }
     
     if (embedding.length !== EMBEDDING_DIM) {
       throw new Error(`Expected ${EMBEDDING_DIM}-dim embedding, got ${embedding.length}-dim`);
@@ -81,15 +53,46 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 }
 
 /**
- * Batch generate embeddings
+ * Batch generate embeddings for multiple texts
+ * More efficient than calling generateEmbedding multiple times
  */
 export async function generateEmbeddingsBatch(texts: string[]): Promise<number[][]> {
   try {
     console.log(`[Crawler Embeddings] Generating batch embeddings for ${texts.length} texts...`);
     
-    const embeddings = await Promise.all(
-      texts.map(text => generateEmbedding(text))
-    );
+    const response = await fetch(`${E5_API_URL}/embed/batch`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        inputs: texts,
+        task: 'passage', // Document/passage embeddings
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`E5 API error (${response.status}): ${errorText}`);
+    }
+    
+    const data = await response.json();
+    const embeddings = data.embeddings as number[][];
+    
+    if (!embeddings || !Array.isArray(embeddings)) {
+      throw new Error('Invalid response format from E5 API');
+    }
+    
+    if (embeddings.length !== texts.length) {
+      throw new Error(`Expected ${texts.length} embeddings, got ${embeddings.length}`);
+    }
+    
+    // Validate each embedding
+    for (let i = 0; i < embeddings.length; i++) {
+      if (embeddings[i].length !== EMBEDDING_DIM) {
+        throw new Error(`Embedding ${i} has wrong dimension: ${embeddings[i].length} (expected ${EMBEDDING_DIM})`);
+      }
+    }
     
     console.log(`[Crawler Embeddings] ✅ Batch completed: ${embeddings.length} embeddings`);
     return embeddings;
@@ -104,9 +107,9 @@ export async function generateEmbeddingsBatch(texts: string[]): Promise<number[]
  */
 export function getModelInfo() {
   return {
-    modelName: MODEL,
+    modelName: 'intfloat/multilingual-e5-small',
     embeddingDim: EMBEDDING_DIM,
-    isInitialized: pipeline_instance !== null,
-    isInitializing,
+    apiUrl: E5_API_URL,
+    task: 'passage',
   };
 }

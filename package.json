@@ -9,14 +9,12 @@
     "postinstall": "node -e \"try { require('sharp'); console.log('Sharp loaded successfully'); } catch (e) { console.log('Sharp optional dependency not available, continuing without it...'); }\""
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.8.1",
     "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.99.1",
     "@upstash/qstash": "^2.9.0",
     "cheerio": "^1.2.0",
     "gpt-tokenizer": "^3.4.0",
     "next": "16.1.6",
-    "onnxruntime-web": "^1.24.3",
     "p-queue": "^9.1.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
