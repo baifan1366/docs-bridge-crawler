@@ -1,6 +1,7 @@
 /**
  * Cron job to check for updated pages via sitemap
- * Runs every hour via Vercel Cron
+ * Runs weekly on Sunday at midnight via Vercel Cron
+ * Note: Hobby accounts are limited to daily cron jobs with ±59 min precision
  */
 
 import { NextRequest, NextResponse } from 'next/server';

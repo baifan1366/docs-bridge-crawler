@@ -1,6 +1,7 @@
 /**
  * Cron job to check and update document embeddings
- * Runs every 6 hours to check if kb_documents need embedding updates
+ * Runs daily at 2 AM to check if kb_documents need embedding updates
+ * Note: Hobby accounts are limited to daily cron jobs
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -142,7 +143,7 @@ async function processDocumentEmbeddings(
   if (chunksError) throw chunksError;
 
   const existingChunkMap = new Map(
-    (existingChunks || []).map(chunk => [chunk.chunk_index, chunk])
+    (existingChunks || []).map((chunk: any) => [chunk.chunk_index, chunk])
   );
 
   const newChunkIds: string[] = [];
@@ -157,8 +158,8 @@ async function processDocumentEmbeddings(
     const existingChunk = existingChunkMap.get(i);
     
     // Skip if chunk hasn't changed
-    if (existingChunk && existingChunk.chunk_hash === chunkHash) {
-      newChunkIds.push(existingChunk.id);
+    if (existingChunk && (existingChunk as any).chunk_hash === chunkHash) {
+      newChunkIds.push((existingChunk as any).id);
       continue;
     }
 
@@ -177,11 +178,11 @@ async function processDocumentEmbeddings(
           embedding_large: large,
           updated_at: new Date().toISOString()
         })
-        .eq('id', existingChunk.id);
+        .eq('id', (existingChunk as any).id);
 
       if (updateError) throw updateError;
       
-      newChunkIds.push(existingChunk.id);
+      newChunkIds.push((existingChunk as any).id);
       chunksUpdated++;
     } else {
       // Create new chunk
@@ -208,8 +209,8 @@ async function processDocumentEmbeddings(
 
   // Remove old chunks that are no longer needed
   const chunksToRemove = (existingChunks || [])
-    .filter(chunk => chunk.chunk_index >= chunks.length)
-    .map(chunk => chunk.id);
+    .filter((chunk: any) => chunk.chunk_index >= chunks.length)
+    .map((chunk: any) => chunk.id);
 
   if (chunksToRemove.length > 0) {
     const { error: deleteError } = await supabase

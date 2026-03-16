@@ -93,7 +93,12 @@ export default function EmbeddingsStatus() {
   return (
     <div className="p-6">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold">Document Embeddings</h2>
+        <div>
+          <h2 className="text-2xl font-bold">Document Embeddings</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Auto-update runs daily at 2 AM (Vercel Hobby plan limitation)
+          </p>
+        </div>
         <button
           onClick={updateAll}
           disabled={updating === 'all'}
@@ -104,16 +109,36 @@ export default function EmbeddingsStatus() {
       </div>
 
       {stats && (
-        <div className="grid grid-cols-2 gap-4 mb-6">
-          <div className="bg-gray-100 p-4 rounded">
-            <h3 className="font-semibold">Total Documents</h3>
-            <p className="text-2xl">{stats.total}</p>
+        <>
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div className="bg-gray-100 p-4 rounded">
+              <h3 className="font-semibold">Total Documents</h3>
+              <p className="text-2xl">{stats.total}</p>
+            </div>
+            <div className="bg-yellow-100 p-4 rounded">
+              <h3 className="font-semibold">Need Updates</h3>
+              <p className="text-2xl">{stats.needs_update}</p>
+            </div>
           </div>
-          <div className="bg-yellow-100 p-4 rounded">
-            <h3 className="font-semibold">Need Updates</h3>
-            <p className="text-2xl">{stats.needs_update}</p>
+          
+          <div className="bg-blue-50 border border-blue-200 rounded p-4 mb-6">
+            <div className="flex items-start">
+              <div className="shrink-0">
+                <svg className="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <div className="ml-3">
+                <h3 className="text-sm font-medium text-blue-800">Vercel Hobby Plan Limitations</h3>
+                <div className="mt-2 text-sm text-blue-700">
+                  <p>• Automatic updates run once daily (2 AM ±59 min)</p>
+                  <p>• Use manual updates for immediate processing</p>
+                  <p>• Upgrade to Pro for more frequent updates</p>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
+        </>
       )}
 
       <div className="space-y-4">
