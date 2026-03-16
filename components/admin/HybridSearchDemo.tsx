@@ -26,6 +26,7 @@ interface SearchResponse {
   metadata: {
     search_options: any;
   };
+  error?: string; // 添加可选的error属性
 }
 
 export default function HybridSearchDemo() {
@@ -61,7 +62,7 @@ export default function HybridSearchDemo() {
         }),
       });
 
-      const data: SearchResponse = await response.json();
+      const data = await response.json();
       
       if (!response.ok) {
         throw new Error(data.error || 'Search failed');
