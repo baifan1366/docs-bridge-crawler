@@ -8,10 +8,22 @@ import { smartFetch } from './smart-fetcher';
 import { chunkBySections, fallbackChunking } from '../processing/section-chunker';
 import { extractWithRules } from '../processing/rule-extractor';
 import { generateDualEmbeddings } from '../embeddings/generator';
+import { CRAWLER_CONFIG, getTruncatedContent, getTruncatedHtml, isContentValid, getProcessingMetadata } from './config';
+import { safeDocumentUpsert } from './db-utils';
+import { createDocumentChunker } from '../processing/document-chunker';
+import { getEmbeddingQueue } from '../queue/embedding-queue';
 import { isPDFUrl, processPDF, cleanPDFText } from './pdf-processor';
 import { logCrawlMetrics } from '../monitoring/metrics';
 import { createHash } from 'crypto';
 import * as cheerio from 'cheerio';
+
+// Import new standard processing modules
+import { cleanHTML } from '../processing/html-cleaner';
+import { parseDocumentStructure } from '../processing/structure-parser';
+import { normalizeText } from '../processing/text-normalizer';
+import { SemanticChunker } from '../processing/semantic-chunker';
+import { generateMetadata } from '../processing/metadata-generator';
+
 
 export async function processPage(url: string, sourceId: string) {
   console.log(`[START] Processing: ${url}`);
@@ -29,6 +41,10 @@ export async function processPage(url: string, sourceId: string) {
   let imageAlts: string[] = [];
   let tables: any[] = [];
   let page: any;
+  let cleaningResult: any;
+  let documentStructure: any;
+  let normalizationResult: any;
+  let semanticChunkingResult: any;
 
   try {
     // 1. Get source config
@@ -161,39 +177,63 @@ export async function processPage(url: string, sourceId: string) {
 
       console.log(`[PROCESS] Content changed or new page: ${url}`);
 
-      // 5. HTML Cleaning and Content Extraction
-      console.log(`[STEP 5] Cleaning HTML...`);
-      const $ = cheerio.load(html);
+      // 5. Standard Data Processing Pipeline (Hackathon Quality)
+      console.log(`[STEP 5] Starting standard data processing pipeline...`);
       
-      // Extract image alt texts before removing images
+      // 5.1 HTML Cleaning (Government-specific)
+      console.log(`[STEP 5.1] HTML cleaning with government-specific patterns...`);
+      cleaningResult = await cleanHTML(html, {
+        removeNavigation: true,
+        removeFooter: true,
+        removeSidebar: true,
+        removeAds: true,
+        removeCookieBanners: true,
+        preserveStructure: true,
+        minContentLength: 100
+      });
+      
+      text = cleaningResult.cleanText;
+      title = cleaningResult.title;
+      language = cleaningResult.language;
+      
+      console.log(`[STEP 5.1] HTML cleaned - Method: ${cleaningResult.metadata.extractionMethod}, Score: ${cleaningResult.metadata.contentScore}`);
+      console.log(`[STEP 5.1] Content reduced from ${cleaningResult.metadata.originalLength} to ${cleaningResult.metadata.cleanedLength} chars`);
+      
+      // 5.2 Document Structure Parsing
+      console.log(`[STEP 5.2] Parsing document structure...`);
+      documentStructure = parseDocumentStructure(html, text);
+      
+      console.log(`[STEP 5.2] Structure parsed - ${documentStructure.metadata.totalSections} sections, max depth: ${documentStructure.metadata.maxDepth}`);
+      console.log(`[STEP 5.2] Structure type: ${documentStructure.metadata.structureType}, method: ${documentStructure.metadata.extractionMethod}`);
+      
+      // 5.3 Text Normalization
+      console.log(`[STEP 5.3] Normalizing text...`);
+      normalizationResult = await normalizeText(text, {
+        removeDuplicateLines: true,
+        normalizeWhitespace: true,
+        fixEncoding: true,
+        removePageNumbers: true,
+        removeHeaders: true,
+        removeFooters: true,
+        minLineLength: 3
+      });
+      
+      text = normalizationResult.normalizedText;
+      
+      console.log(`[STEP 5.3] Text normalized - ${normalizationResult.metadata.duplicatesRemoved} duplicates removed`);
+      console.log(`[STEP 5.3] Fixed ${normalizationResult.metadata.encodingIssuesFixed} encoding issues, removed ${normalizationResult.metadata.pageNumbersRemoved} page numbers`);
+      
+      // Extract legacy metadata for compatibility
+      const $ = cheerio.load(html);
       $('img[alt]').each((i, elem) => {
         const alt = $(elem).attr('alt')?.trim();
         if (alt && alt.length > 3) {
           imageAlts.push(alt);
         }
       });
-      
-      // Extract table data as structured JSON before converting to text
       tables = extractTables($);
       
-      // Remove unwanted elements
-      $('script, style, nav, footer, header, .ads').remove();
-      
-      // Convert images to alt text placeholders
-      $('img[alt]').each((i, elem) => {
-        const alt = $(elem).attr('alt');
-        if (alt) {
-          $(elem).replaceWith(`[Image: ${alt}]`);
-        } else {
-          $(elem).remove();
-        }
-      });
-      
-      text = $('body').text().replace(/\s+/g, ' ').trim();
-      title = $('title').text() || $('h1').first().text();
-      language = $('html').attr('lang') || 'en';
-      
-      console.log(`[STEP 5] Extracted - Title: "${title}", Language: ${language}, Text length: ${text.length}`);
+      console.log(`[STEP 5] Standard processing complete - Title: "${title}", Language: ${language}, Text length: ${text.length}`);
       console.log(`[STEP 5] Found ${imageAlts.length} images with alt text, ${tables.length} tables`);
 
       // 6. Update page record
@@ -235,11 +275,29 @@ export async function processPage(url: string, sourceId: string) {
     console.log(`[DOCUMENT] Using folder: ${folderId}`);
     
     console.log(`[STEP 7] Creating/updating document...`);
+    
+    // Limit content size to prevent database timeouts
+    const truncatedText = getTruncatedContent(text);
+    const truncatedHtml = getTruncatedHtml(html);
+    
+    // Validate content quality
+    if (!isContentValid(truncatedText, title)) {
+      throw new Error(`Content does not meet quality thresholds: title length ${title.length}, content length ${truncatedText.length}`);
+    }
+    
+    const processingMetadata = getProcessingMetadata(text, html, truncatedText, truncatedHtml);
+    
+    console.log(`[DEBUG] Content processing:`, {
+      original_sizes: { text: text.length, html: html.length },
+      processed_sizes: { text: truncatedText.length, html: truncatedHtml.length },
+      truncated: { content: processingMetadata.content_truncated, html: processingMetadata.html_truncated }
+    });
+    
     console.log(`[DEBUG] Document data:`, {
       folder_id: folderId,
       title,
       source_url: url,
-      content_length: text.length,
+      content_length: truncatedText.length,
       content_hash: contentHash,
       document_type: 'gov_crawled',
       language
@@ -268,8 +326,8 @@ export async function processPage(url: string, sourceId: string) {
         .update({
           folder_id: folderId,
           title,
-          content: text,
-          raw_content: html,
+          content: truncatedText,
+          raw_content: truncatedHtml,
           content_hash: contentHash,
           language,
           trust_level: source.metadata?.trust_level || 1.0,
@@ -282,7 +340,8 @@ export async function processPage(url: string, sourceId: string) {
             extraction_stats: {
               images_count: imageAlts.length,
               tables_count: tables.length
-            }
+            },
+            processing: processingMetadata
           }
         })
         .eq('id', existingDoc.id)
@@ -300,8 +359,8 @@ export async function processPage(url: string, sourceId: string) {
           folder_id: folderId,
           user_id: null,
           title,
-          content: text,
-          raw_content: html,
+          content: truncatedText,
+          raw_content: truncatedHtml,
           content_hash: contentHash,
           document_type: 'gov_crawled',
           source_url: url,
@@ -316,7 +375,8 @@ export async function processPage(url: string, sourceId: string) {
             extraction_stats: {
               images_count: imageAlts.length,
               tables_count: tables.length
-            }
+            },
+            processing: processingMetadata
           }
         })
         .select()
@@ -362,19 +422,49 @@ export async function processPage(url: string, sourceId: string) {
       console.log(`[STEP 8] Structured data saved`);
     }
 
-    // 9. Section-Aware Chunking
-    console.log(`[STEP 9] Chunking content...`);
-    let chunks = chunkBySections(html);
+    // 9. Semantic Chunking (RAG Optimized)
+    console.log(`[STEP 9] Creating semantic chunks...`);
     
-    if (chunks.length === 0) {
-      console.log('[FALLBACK] No sections found, using token-based chunking');
-      chunks = fallbackChunking(text);
+    const semanticChunker = new SemanticChunker({
+      target_chunk_size: 500,
+      max_chunk_size: 600,
+      min_chunk_size: 200,
+      overlap_size: 100,
+      preserve_boundaries: true,
+      include_context: true,
+      split_long_paragraphs: true
+    });
+    
+    semanticChunkingResult = semanticChunker.chunkWithStructure(documentStructure);
+    
+    console.log(`[STEP 9] Created ${semanticChunkingResult.chunks.length} semantic chunks`);
+    console.log(`[STEP 9] Chunking method: ${semanticChunkingResult.metadata.chunking_method}, avg size: ${semanticChunkingResult.metadata.avg_chunk_size} tokens`);
+    console.log(`[STEP 9] Boundary preservation: ${semanticChunkingResult.metadata.boundary_preservation}%`);
+
+    // 10. Enhanced Metadata Generation
+    console.log(`[STEP 10] Generating enhanced metadata...`);
+    
+    const enhancedChunks = [];
+    for (let i = 0; i < semanticChunkingResult.chunks.length; i++) {
+      const chunk = semanticChunkingResult.chunks[i];
+      
+      const enhancedMetadata = generateMetadata(
+        chunk,
+        documentStructure,
+        url,
+        source.name
+      );
+      
+      enhancedChunks.push({
+        ...chunk,
+        enhanced_metadata: enhancedMetadata
+      });
     }
+    
+    console.log(`[STEP 10] Enhanced metadata generated for ${enhancedChunks.length} chunks`);
 
-    console.log(`[CHUNKS] Created ${chunks.length} chunks`);
-
-    // 10. Delete old chunks
-    console.log(`[STEP 10] Deleting old chunks...`);
+    // 11. Delete old chunks
+    console.log(`[STEP 11] Deleting old chunks...`);
     const { error: deleteError } = await supabase
       .from('document_chunks')
       .delete()
@@ -383,21 +473,21 @@ export async function processPage(url: string, sourceId: string) {
     if (deleteError) {
       console.error(`[WARNING] Failed to delete old chunks:`, deleteError);
     } else {
-      console.log(`[STEP 10] Old chunks deleted`);
+      console.log(`[STEP 11] Old chunks deleted`);
     }
 
-    // 11. Generate embeddings and store
-    console.log(`[STEP 11] Generating embeddings and storing chunks...`);
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
+    // 12. Store enhanced chunks in database (without embeddings initially)
+    console.log(`[STEP 12] Storing enhanced chunks in database...`);
+    const storedChunks: Array<{ id: string; chunk_text: string }> = [];
+    
+    for (let i = 0; i < enhancedChunks.length; i++) {
+      const chunk = enhancedChunks[i];
       
       if (i % 10 === 0) {
-        console.log(`[STEP 11] Processing chunk ${i + 1}/${chunks.length}...`);
+        console.log(`[STEP 12] Storing chunk ${i + 1}/${enhancedChunks.length}...`);
       }
-      
-      const embeddings = await generateDualEmbeddings(chunk.text);
 
-      const { error: chunkError } = await supabase
+      const { data: storedChunk, error: chunkError } = await supabase
         .from('document_chunks')
         .insert({
           document_id: document.id,
@@ -405,33 +495,77 @@ export async function processPage(url: string, sourceId: string) {
           chunk_text: chunk.text,
           chunk_index: i,
           chunk_hash: createHash('sha256').update(chunk.text).digest('hex'),
-          embedding_small: embeddings.small,
-          embedding_large: embeddings.large,
-          token_count: chunk.tokenCount,
-          section_heading: chunk.heading,
-          section_level: chunk.level,
-          is_section_chunk: true,
+          embedding_small: null, // Will be filled by async processing
+          embedding_large: null, // Will be filled by async processing
+          token_count: chunk.tokens,
+          section_heading: chunk.metadata.source_section,
+          section_level: chunk.metadata.section_level,
+          is_section_chunk: chunk.type === 'section',
           metadata: {
-            section_type: chunk.sectionType,
-            position: i === 0 ? 'start' : i === chunks.length - 1 ? 'end' : 'middle'
+            ...chunk.metadata,
+            enhanced_metadata: chunk.enhanced_metadata,
+            chunk_type: chunk.type,
+            semantic_boundaries: chunk.metadata.semantic_boundaries,
+            topic_keywords: chunk.metadata.topic_keywords
           }
-        });
+        })
+        .select('id')
+        .single();
 
       if (chunkError) {
         console.error(`[ERROR] Failed to insert chunk ${i}:`, chunkError);
         throw chunkError;
       }
+
+      storedChunks.push({
+        id: storedChunk.id,
+        chunk_text: chunk.text
+      });
     }
 
-    console.log(`[SUCCESS] Completed: ${url} (${chunks.length} chunks)`);
+    // 13. Update document with chunk IDs
+    console.log(`[STEP 13] Updating document with chunk references...`);
+    const chunkIds = storedChunks.map(chunk => chunk.id);
+    
+    await supabase
+      .from('kb_documents')
+      .update({
+        document_chunks: chunkIds,
+        embeddings_updated_at: null // Will be set when embeddings are complete
+      })
+      .eq('id', document.id);
 
-    // 12. Detect and enqueue pagination links
-    console.log(`[STEP 12] Detecting pagination links...`);
+    // 14. Enqueue chunks for async embedding processing
+    console.log(`[STEP 14] Enqueueing chunks for async embedding processing...`);
+    const embeddingQueue = getEmbeddingQueue();
+    
+    await embeddingQueue.enqueueChunks(
+      document.id,
+      storedChunks,
+      'normal' // Priority: high, normal, low
+    );
+
+    console.log(`[SUCCESS] Completed: ${url} (${enhancedChunks.length} semantic chunks, embeddings queued)`);
+
+    // Optional: Process embeddings immediately for high-priority documents
+    if (source.metadata?.priority === 'high') {
+      console.log(`[STEP 15] Processing embeddings immediately for high-priority document...`);
+      await embeddingQueue.processDocumentJobs(document.id);
+      
+      // Update embeddings_updated_at timestamp
+      await supabase
+        .from('kb_documents')
+        .update({ embeddings_updated_at: new Date().toISOString() })
+        .eq('id', document.id);
+    }
+
+    // 16. Detect and enqueue pagination links
+    console.log(`[STEP 16] Detecting pagination links...`);
     const $ = cheerio.load(html);
     const paginationUrls = detectPaginationLinks($, url);
     
     if (paginationUrls.length > 0) {
-      console.log(`[STEP 12] Found ${paginationUrls.length} pagination links`);
+      console.log(`[STEP 16] Found ${paginationUrls.length} pagination links`);
       
       const { enqueueCrawlJob } = await import('../qstash/client');
       
@@ -444,18 +578,18 @@ export async function processPage(url: string, sourceId: string) {
         }
       }
     } else {
-      console.log(`[STEP 12] No pagination links found`);
+      console.log(`[STEP 16] No pagination links found`);
     }
 
     const duration = Date.now() - startTime;
 
     // Log metrics
-    console.log(`[STEP 13] Logging metrics...`);
+    console.log(`[STEP 17] Logging metrics...`);
     await logCrawlMetrics({
       url,
       status: 'success',
       duration_ms: duration,
-      chunks_created: chunks.length,
+      chunks_created: enhancedChunks.length,
       extraction_method: extracted.extraction_method,
       extraction_confidence: extracted.confidence
     });
@@ -465,13 +599,22 @@ export async function processPage(url: string, sourceId: string) {
     return {
       status: 'success',
       url,
-      chunks: chunks.length,
+      chunks: enhancedChunks.length,
       extraction_method: extracted.extraction_method,
       extraction_confidence: extracted.confidence,
       duration_ms: duration,
       pagination_links_found: paginationUrls.length,
       images_processed: imageAlts.length,
-      tables_processed: tables.length
+      tables_processed: tables.length,
+      processing_pipeline: {
+        html_cleaning_method: cleaningResult.metadata.extractionMethod,
+        content_score: cleaningResult.metadata.contentScore,
+        structure_type: documentStructure.metadata.structureType,
+        sections_found: documentStructure.metadata.totalSections,
+        chunking_method: semanticChunkingResult.metadata.chunking_method,
+        avg_chunk_size: semanticChunkingResult.metadata.avg_chunk_size,
+        boundary_preservation: semanticChunkingResult.metadata.boundary_preservation
+      }
     };
 
   } catch (error: any) {
