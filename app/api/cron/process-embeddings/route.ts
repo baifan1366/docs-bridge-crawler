@@ -1,6 +1,6 @@
 /**
  * Cron job to process embedding queue
- * Runs every 15 minutes to process pending embedding jobs
+ * Runs daily at 4 AM to process pending embedding jobs
  */
 
 import { NextRequest, NextResponse } from 'next/server';

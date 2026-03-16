@@ -3,15 +3,15 @@
   "crons": [
     {
       "path": "/api/cron/check-updates",
-      "schedule": "0 0 * * 0"
-    },
-    {
-      "path": "/api/cron/check-embeddings",
       "schedule": "0 2 * * *"
     },
     {
+      "path": "/api/cron/check-embeddings", 
+      "schedule": "0 3 * * *"
+    },
+    {
       "path": "/api/cron/process-embeddings",
-      "schedule": "0 */4 * * *"
+      "schedule": "0 4 * * *"
     }
   ]
 }

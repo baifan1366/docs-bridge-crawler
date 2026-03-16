@@ -1,6 +1,6 @@
 /**
  * Cron job to check for updated pages via sitemap
- * Runs weekly on Sunday at midnight via Vercel Cron
+ * Runs daily at 2 AM via Vercel Cron
  * Note: Hobby accounts are limited to daily cron jobs with ±59 min precision
  */
 
