@@ -1,5 +1,5 @@
 /**
- * Main page processor - FIXED VERSION
+ * Main page processor
  * Handles crawling, extraction, chunking, and embedding generation
  */
 
@@ -9,6 +9,7 @@ import { chunkBySections, fallbackChunking } from '../processing/section-chunker
 import { extractWithRules } from '../processing/rule-extractor';
 import { generateDualEmbeddings } from '../embeddings/generator';
 import { isPDFUrl, processPDF, cleanPDFText } from './pdf-processor';
+import { processImagesWithOCR } from './ocr-processor';
 import { logCrawlMetrics } from '../monitoring/metrics';
 import { createHash } from 'crypto';
 import * as cheerio from 'cheerio';
@@ -19,16 +20,6 @@ export async function processPage(url: string, sourceId: string) {
   const startTime = Date.now();
   
   const supabase = await createClient();
-
-  // Declare all variables at function scope
-  let html: string;
-  let text: string;
-  let title: string;
-  let language: string;
-  let contentHash: string;
-  let imageAlts: string[] = [];
-  let tables: any[] = [];
-  let page: any;
 
   try {
     // 1. Get source config
@@ -64,7 +55,17 @@ export async function processPage(url: string, sourceId: string) {
       console.log(`[STEP 2] No existing page found`);
     }
 
+    // 3. Smart Fetch (If-Modified-Since + ETag)
     console.log(`[STEP 3] Starting smart fetch...`);
+    
+    let html: string;
+    let text: string;
+    let title: string;
+    let language: string;
+    let contentHash: string;
+    let imageAlts: string[] = [];
+    let tables: any[] = [];
+    let page: any;
     
     // Check if URL is PDF
     if (isPDFUrl(url)) {
@@ -87,7 +88,8 @@ export async function processPage(url: string, sourceId: string) {
             crawl_status: 'success',
             metadata: {
               document_type: 'pdf',
-              ...pdfResult.metadata
+              ...pdfResult.metadata,
+              pages: pdfResult.metadata.pages
             }
           }, { onConflict: 'url' })
           .select()
@@ -229,6 +231,118 @@ export async function processPage(url: string, sourceId: string) {
       console.log(`[PAGE] Created/updated page record: ${page.id}`);
     }
 
+    if (fetchResult.status === 'not-modified') {
+      console.log(`[SKIP] Not modified: ${url}`);
+      await updatePageStatus(supabase, url, 'skipped');
+      return { status: 'skipped', reason: 'not-modified' };
+    }
+
+    if (fetchResult.status === 'error' || !fetchResult.html) {
+      const errorMsg = fetchResult.errorMessage || 'Unknown fetch error';
+      console.error(`[ERROR] Fetch failed: ${url} - ${errorMsg}`);
+      
+      // Record the failed page
+      console.log(`[STEP 3.1] Recording failed page...`);
+      const { error: pageInsertError } = await supabase
+        .from('crawler_pages')
+        .upsert({
+          source_id: sourceId,
+          url,
+          url_hash: createHash('sha256').update(url).digest('hex'),
+          last_crawled_at: new Date().toISOString(),
+          crawl_status: 'failed',
+          error_message: errorMsg
+        }, { onConflict: 'url' });
+      
+      if (pageInsertError) {
+        console.error(`[ERROR] Failed to record failed page:`, pageInsertError);
+      } else {
+        console.log(`[STEP 3.1] Failed page recorded`);
+      }
+      
+      return { status: 'failed', reason: 'fetch-error', error: errorMsg };
+    }
+
+    // 4. Content Hash check
+    console.log(`[STEP 4] Checking content hash...`);
+    const html = fetchResult.html;
+    const contentHash = createHash('sha256').update(html).digest('hex');
+
+    if (existingPage && existingPage.content_hash === contentHash) {
+      console.log(`[SKIP] Content unchanged: ${url}`);
+      await updatePageStatus(supabase, url, 'skipped');
+      return { status: 'skipped', reason: 'content-unchanged' };
+    }
+
+    console.log(`[PROCESS] Content changed or new page: ${url}`);
+
+    // 5. HTML Cleaning and Content Extraction
+    console.log(`[STEP 5] Cleaning HTML...`);
+    const $ = cheerio.load(html);
+    
+    // Extract image alt texts before removing images
+    const imageAlts: string[] = [];
+    $('img[alt]').each((i, elem) => {
+      const alt = $(elem).attr('alt')?.trim();
+      if (alt && alt.length > 3) {
+        imageAlts.push(alt);
+      }
+    });
+    
+    // Extract table data as structured JSON before converting to text
+    const tables = extractTables($);
+    
+    // Remove unwanted elements
+    $('script, style, nav, footer, header, .ads').remove();
+    
+    // Convert images to alt text placeholders
+    $('img[alt]').each((i, elem) => {
+      const alt = $(elem).attr('alt');
+      if (alt) {
+        $(elem).replaceWith(`[Image: ${alt}]`);
+      } else {
+        $(elem).remove();
+      }
+    });
+    
+    const text = $('body').text().replace(/\s+/g, ' ').trim();
+    const title = $('title').text() || $('h1').first().text();
+    const language = $('html').attr('lang') || 'en';
+    
+    console.log(`[STEP 5] Extracted - Title: "${title}", Language: ${language}, Text length: ${text.length}`);
+    console.log(`[STEP 5] Found ${imageAlts.length} images with alt text, ${tables.length} tables`);
+
+    // 6. Update page record
+    console.log(`[STEP 6] Creating/updating page record...`);
+    const { data: page, error: pageError } = await supabase
+      .from('crawler_pages')
+      .upsert({
+        source_id: sourceId,
+        url,
+        url_hash: createHash('sha256').update(url).digest('hex'),
+        content_hash: contentHash,
+        title,
+        language,
+        last_crawled_at: new Date().toISOString(),
+        crawl_status: 'success',
+        etag: fetchResult.etag,
+        last_modified_header: fetchResult.lastModified,
+        metadata: {
+          word_count: text.split(/\s+/).length,
+          images_with_alt: imageAlts.length,
+          tables_count: tables.length
+        }
+      }, { onConflict: 'url' })
+      .select()
+      .single();
+
+    if (pageError || !page) {
+      console.error(`[ERROR] Failed to upsert page:`, pageError);
+      throw new Error(`Failed to create/update page record: ${pageError?.message || 'No data returned'}`);
+    }
+
+    console.log(`[PAGE] Created/updated page record: ${page.id}`);
+
     // 7. Create/update document
     console.log(`[STEP 7] Getting or creating folder...`);
     const folderId = await getOrCreateFolder(supabase, source.name);
@@ -246,6 +360,7 @@ export async function processPage(url: string, sourceId: string) {
     });
     
     // Check if document exists with same source_url and content_hash
+    // We use content_hash to identify if it's the same content
     const { data: existingDocs } = await supabase
       .from('kb_documents')
       .select('id, content_hash')
@@ -292,7 +407,7 @@ export async function processPage(url: string, sourceId: string) {
       document = result.data;
       docError = result.error;
     } else {
-      // Insert new document
+      // Insert new document (either first time or content changed significantly)
       console.log(`[DEBUG] Inserting new document`);
       const result = await supabase
         .from('kb_documents')
@@ -325,7 +440,7 @@ export async function processPage(url: string, sourceId: string) {
       document = result.data;
       docError = result.error;
       
-      // If we inserted a new document but there were old ones, clean up old versions
+      // If we inserted a new document but there were old ones, optionally clean up old versions
       if (!docError && existingDocs && existingDocs.length > 0) {
         console.log(`[DEBUG] Cleaning up ${existingDocs.length} old document versions`);
         const oldDocIds = existingDocs.map(d => d.id);
@@ -338,6 +453,7 @@ export async function processPage(url: string, sourceId: string) {
 
     if (docError || !document) {
       console.error(`[ERROR] Failed to save document:`, docError);
+      console.error(`[ERROR] Error details:`, JSON.stringify(docError, null, 2));
       throw new Error(`Failed to create/update document: ${docError?.message || 'No data returned'}`);
     }
 
@@ -405,8 +521,8 @@ export async function processPage(url: string, sourceId: string) {
           chunk_text: chunk.text,
           chunk_index: i,
           chunk_hash: createHash('sha256').update(chunk.text).digest('hex'),
-          embedding_small: embeddings.small,
-          embedding_large: embeddings.large,
+          embedding_small: embeddings.small,  // 384-dim from e5-small
+          embedding_large: embeddings.large,  // 1024-dim from bge-m3
           token_count: chunk.tokenCount,
           section_heading: chunk.heading,
           section_level: chunk.level,
@@ -427,12 +543,12 @@ export async function processPage(url: string, sourceId: string) {
 
     // 12. Detect and enqueue pagination links
     console.log(`[STEP 12] Detecting pagination links...`);
-    const $ = cheerio.load(html);
     const paginationUrls = detectPaginationLinks($, url);
     
     if (paginationUrls.length > 0) {
       console.log(`[STEP 12] Found ${paginationUrls.length} pagination links`);
       
+      // Import enqueueCrawlJob dynamically to avoid circular imports
       const { enqueueCrawlJob } = await import('../qstash/client');
       
       for (const paginationUrl of paginationUrls) {
@@ -534,7 +650,7 @@ async function getOrCreateFolder(supabase: any, sourceName: string): Promise<str
       folder_type: 'official_gov',
       is_system: true,
       is_active: true,
-      user_id: null
+      user_id: null  // System folders have no user
     })
     .select()
     .single();
@@ -577,6 +693,9 @@ function detectPageType(title: string, text: string): string {
   return 'general';
 }
 
+/**
+ * Extract tables as structured JSON data with improved complex table support
+ */
 function extractTables($: cheerio.CheerioAPI): Array<{
   headers: string[];
   rows: string[][];
@@ -627,9 +746,10 @@ function extractTables($: cheerio.CheerioAPI): Array<{
       tableType = 'complex';
     }
     
-    // Extract headers
+    // Extract headers with improved logic
     let headerRow = $table.find('thead tr').first();
     if (headerRow.length === 0) {
+      // Try first row if no thead
       headerRow = $table.find('tr').first();
     }
     
@@ -637,16 +757,19 @@ function extractTables($: cheerio.CheerioAPI): Array<{
       headerRow.find('th, td').each((j, cell) => {
         const $cell = $(cell);
         let cellText = $cell.text().trim();
+        
+        // Handle colspan in headers
         const colspan = parseInt($cell.attr('colspan') || '1');
         headers.push(cellText);
         
+        // Add empty headers for colspan
         for (let k = 1; k < colspan; k++) {
           headers.push('');
         }
       });
     }
     
-    // Extract data rows
+    // Extract data rows with improved handling
     const dataRows = $table.find('tbody tr').length > 0 
       ? $table.find('tbody tr')
       : $table.find('tr').slice(headers.length > 0 ? 1 : 0);
@@ -659,7 +782,9 @@ function extractTables($: cheerio.CheerioAPI): Array<{
         const $cell = $(cell);
         let cellText = $cell.text().trim();
         
+        // Handle special cell types
         if ($cell.find('a').length > 0) {
+          // Include link URLs
           const links = $cell.find('a').map((l, link) => {
             const href = $(link).attr('href');
             const text = $(link).text().trim();
@@ -668,14 +793,17 @@ function extractTables($: cheerio.CheerioAPI): Array<{
           cellText = links.join(', ');
         }
         
+        // Handle lists in cells
         if ($cell.find('ul, ol').length > 0) {
           const listItems = $cell.find('li').map((l, li) => $(li).text().trim()).get();
           cellText = listItems.join('; ');
         }
         
+        // Handle colspan
         const colspan = parseInt($cell.attr('colspan') || '1');
         rowData.push(cellText);
         
+        // Add empty cells for colspan
         for (let l = 1; l < colspan; l++) {
           rowData.push('');
         }
@@ -686,6 +814,7 @@ function extractTables($: cheerio.CheerioAPI): Array<{
       }
     });
     
+    // Calculate metadata
     const rowCount = rows.length;
     const columnCount = Math.max(headers.length, ...rows.map(row => row.length));
     
@@ -710,10 +839,14 @@ function extractTables($: cheerio.CheerioAPI): Array<{
   return tables;
 }
 
+/**
+ * Detect and extract pagination links
+ */
 function detectPaginationLinks($: cheerio.CheerioAPI, currentUrl: string): string[] {
   const paginationUrls: string[] = [];
   const baseUrl = new URL(currentUrl).origin;
   
+  // Common pagination selectors
   const paginationSelectors = [
     'a[href*="page"]',
     'a[href*="halaman"]', 
@@ -741,5 +874,5 @@ function detectPaginationLinks($: cheerio.CheerioAPI, currentUrl: string): strin
     });
   });
   
-  return paginationUrls.slice(0, 5);
+  return paginationUrls.slice(0, 5); // Limit to 5 pagination links
 }

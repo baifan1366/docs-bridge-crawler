@@ -63,7 +63,7 @@ export async function GET(request: NextRequest) {
           console.log(`[CRON] Found ${urlsToUpdate.length} updated URLs for ${source.name}`);
           
           // Limit URLs to prevent timeout (max 1 per cron run for testing)
-          const MAX_URLS_PER_RUN = 1;
+          const MAX_URLS_PER_RUN = 50;
           const urlsToEnqueue = urlsToUpdate.slice(0, MAX_URLS_PER_RUN);
           
           if (urlsToUpdate.length > MAX_URLS_PER_RUN) {

@@ -16,9 +16,11 @@
     "gpt-tokenizer": "^3.4.0",
     "next": "16.1.6",
     "p-queue": "^9.1.0",
+    "pdf-parse": "^1.1.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "robots-parser": "^3.0.1",
+    "tesseract.js": "^5.1.1",
     "xml2js": "^0.6.2"
   },
   "devDependencies": {
