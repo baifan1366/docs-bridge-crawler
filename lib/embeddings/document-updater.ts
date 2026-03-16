@@ -170,8 +170,8 @@ async function processDocumentEmbeddings(
     const existingChunk = existingChunkMap.get(i);
     
     // Skip if chunk hasn't changed
-    if (existingChunk && existingChunk.chunk_hash === chunkHash) {
-      newChunkIds.push(existingChunk.id);
+    if (existingChunk && (existingChunk as any).chunk_hash === chunkHash) {
+      newChunkIds.push((existingChunk as any).id);
       continue;
     }
 
@@ -190,11 +190,11 @@ async function processDocumentEmbeddings(
           embedding_large: large,
           updated_at: new Date().toISOString()
         })
-        .eq('id', existingChunk.id);
+        .eq('id', (existingChunk as any).id);
 
       if (updateError) throw updateError;
       
-      newChunkIds.push(existingChunk.id);
+      newChunkIds.push((existingChunk as any).id);
       stats.chunks_updated++;
     } else {
       // Create new chunk

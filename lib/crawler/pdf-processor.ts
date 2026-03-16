@@ -4,7 +4,7 @@
  */
 
 // @ts-ignore - pdf-parse doesn't have proper TypeScript definitions
-import * as pdfParse from 'pdf-parse';
+const pdfParse = require('pdf-parse');
 
 export interface PDFProcessResult {
   text: string;

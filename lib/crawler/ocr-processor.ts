@@ -3,7 +3,9 @@
  * Uses Tesseract.js for client-side OCR
  */
 
+// @ts-ignore - tesseract.js may not have complete type definitions
 import { createWorker } from 'tesseract.js';
+import * as cheerio from 'cheerio';
 
 export interface OCRResult {
   text: string;
@@ -34,7 +36,7 @@ export async function extractTextFromImage(imageUrl: string): Promise<OCRResult>
   
   try {
     const worker = await createWorker('eng+chi_sim+chi_tra+mal', 1, {
-      logger: m => {
+      logger: (m: any) => {
         if (m.status === 'recognizing text') {
           console.log(`[OCR] Progress: ${Math.round(m.progress * 100)}%`);
         }
