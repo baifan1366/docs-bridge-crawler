@@ -29,6 +29,11 @@ export async function createClient() {
           }
         },
       },
+      global: {
+        headers: {
+          'x-supabase-fetch-timeout': '120000', // 120 second timeout
+        },
+      },
     }
   );
 }

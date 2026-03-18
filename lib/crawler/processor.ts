@@ -337,6 +337,16 @@ export async function processPage(
     let document;
     let docError;
     
+    // Simplified metadata to avoid large object causing timeout
+    // Keep source.metadata but only essential fields
+    const simpleMetadata = {
+      ...source.metadata,  // Keep source metadata (trust_level, priority, etc.)
+      page_type: detectPageType(title, text),
+      images_count: imageAlts.length,
+      tables_count: tables.length,
+      processing_method: cleaningResult.metadata.extractionMethod
+    };
+    
     if (existingDoc) {
       // Update existing document with same content
       console.log(`[DEBUG] Updating existing document: ${existingDoc.id}`);
@@ -351,20 +361,10 @@ export async function processPage(
           language,
           trust_level: source.metadata?.trust_level || 1.0,
           last_crawled_at: new Date().toISOString(),
-          metadata: {
-            ...source.metadata,
-            page_type: detectPageType(title, text),
-            images_alt_texts: imageAlts,
-            tables: tables,
-            extraction_stats: {
-              images_count: imageAlts.length,
-              tables_count: tables.length
-            },
-            processing: processingMetadata
-          }
+          metadata: simpleMetadata
         })
         .eq('id', existingDoc.id)
-        .select()
+        .select('id')
         .single();
       
       document = result.data;
@@ -386,33 +386,13 @@ export async function processPage(
           language,
           trust_level: source.metadata?.trust_level || 1.0,
           last_crawled_at: new Date().toISOString(),
-          metadata: {
-            ...source.metadata,
-            page_type: detectPageType(title, text),
-            images_alt_texts: imageAlts,
-            tables: tables,
-            extraction_stats: {
-              images_count: imageAlts.length,
-              tables_count: tables.length
-            },
-            processing: processingMetadata
-          }
+          metadata: simpleMetadata
         })
-        .select()
+        .select('id')
         .single();
       
       document = result.data;
       docError = result.error;
-      
-      // If we inserted a new document but there were old ones, clean up old versions
-      if (!docError && existingDocs && existingDocs.length > 0) {
-        console.log(`[DEBUG] Cleaning up ${existingDocs.length} old document versions`);
-        const oldDocIds = existingDocs.map(d => d.id);
-        await supabase
-          .from('kb_documents')
-          .delete()
-          .in('id', oldDocIds);
-      }
     }
 
     if (docError || !document) {
