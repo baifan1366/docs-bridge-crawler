@@ -36,13 +36,18 @@ export class EmbeddingQueue {
   private supabase: any;
   private isProcessing: boolean = false;
   private processingInterval?: NodeJS.Timeout;
+  private initPromise: Promise<void>;
 
   constructor() {
-    this.initializeQueue();
+    this.initPromise = this.initializeQueue();
   }
 
   private async initializeQueue() {
     this.supabase = await createClient();
+  }
+
+  private async ensureInitialized() {
+    await this.initPromise;
   }
 
   /**
@@ -53,7 +58,9 @@ export class EmbeddingQueue {
     chunks: Array<{ id: string; chunk_text: string }>,
     priority: 'high' | 'normal' | 'low' = 'normal'
   ): Promise<void> {
-    console.log(`[EMBEDDING-QUEUE] Enqueueing ${chunks.length} chunks for document ${documentId}`);
+    await this.ensureInitialized();
+    console.log(`[EMBEDDING-QUEUE] 📥 Enqueueing ${chunks.length} chunks for document ${documentId}`);
+    console.log(`[EMBEDDING-QUEUE] 🎯 Priority: ${priority}`);
 
     const jobs: Partial<EmbeddingJob>[] = chunks.map(chunk => ({
       id: `${documentId}_${chunk.id}_${Date.now()}`,
@@ -67,23 +74,33 @@ export class EmbeddingQueue {
       status: 'pending' as const
     }));
 
+    console.log(`[EMBEDDING-QUEUE] 📝 Sample job details:`, {
+      jobId: jobs[0]?.id,
+      chunkId: jobs[0]?.chunk_id,
+      textPreview: jobs[0]?.chunk_text?.substring(0, 100) + '...',
+      textLength: jobs[0]?.chunk_text?.length
+    });
+
     // Store jobs in database (using a simple table for now)
     const { error } = await this.supabase
       .from('embedding_queue')
       .insert(jobs);
 
     if (error) {
-      console.error('[EMBEDDING-QUEUE] Failed to enqueue jobs:', error);
+      console.error('[EMBEDDING-QUEUE] ❌ Failed to enqueue jobs:', error);
       throw error;
     }
 
-    console.log(`[EMBEDDING-QUEUE] Successfully enqueued ${jobs.length} jobs`);
+    console.log(`[EMBEDDING-QUEUE] ✅ Successfully enqueued ${jobs.length} jobs`);
+    console.log(`[EMBEDDING-QUEUE] 🔄 Jobs will be processed by cron job at 4 AM daily`);
   }
 
   /**
    * Process pending embedding jobs
    */
   async processQueue(batchSize: number = CRAWLER_CONFIG.EMBEDDING_BATCH_SIZE): Promise<void> {
+    await this.ensureInitialized();
+    
     if (this.isProcessing) {
       console.log('[EMBEDDING-QUEUE] Already processing, skipping...');
       return;
@@ -128,16 +145,34 @@ export class EmbeddingQueue {
    * Process a single embedding job
    */
   private async processJob(job: EmbeddingJob): Promise<void> {
-    console.log(`[EMBEDDING-QUEUE] Processing job ${job.id} for chunk ${job.chunk_id}`);
+    const jobStartTime = Date.now();
+    console.log(`[EMBEDDING-QUEUE] 🔄 Processing job ${job.id} for chunk ${job.chunk_id}`);
+    console.log(`[EMBEDDING-QUEUE] 📝 Chunk details:`, {
+      textLength: job.chunk_text.length,
+      textPreview: job.chunk_text.substring(0, 100) + '...',
+      attempts: job.attempts,
+      maxAttempts: job.max_attempts
+    });
 
     // Mark job as processing
     await this.updateJobStatus(job.id, 'processing');
 
     try {
       // Generate embeddings
+      console.log(`[EMBEDDING-QUEUE] 🧠 Generating dual embeddings...`);
+      const embeddingStartTime = Date.now();
       const { small, large } = await generateDualEmbeddings(job.chunk_text);
+      const embeddingDuration = Date.now() - embeddingStartTime;
+      
+      console.log(`[EMBEDDING-QUEUE] ✅ Generated embeddings in ${embeddingDuration}ms:`, {
+        smallDim: small.length,
+        largeDim: large.length,
+        smallSample: small.slice(0, 3),
+        largeSample: large.slice(0, 3)
+      });
 
       // Update document chunk with embeddings
+      console.log(`[EMBEDDING-QUEUE] 💾 Saving embeddings to chunk ${job.chunk_id}...`);
       const { error: updateError } = await this.supabase
         .from('document_chunks')
         .update({
@@ -147,24 +182,38 @@ export class EmbeddingQueue {
         })
         .eq('id', job.chunk_id);
 
-      if (updateError) throw updateError;
+      if (updateError) {
+        console.error(`[EMBEDDING-QUEUE] ❌ Failed to save embeddings:`, updateError);
+        throw updateError;
+      }
 
       // Mark job as completed
       await this.updateJobStatus(job.id, 'completed', undefined, new Date().toISOString());
 
-      console.log(`[EMBEDDING-QUEUE] ✅ Completed job ${job.id}`);
+      const totalJobDuration = Date.now() - jobStartTime;
+      console.log(`[EMBEDDING-QUEUE] ✅ Completed job ${job.id} in ${totalJobDuration}ms`);
+      console.log(`[EMBEDDING-QUEUE] 📊 Performance breakdown:`, {
+        embeddingGeneration: embeddingDuration,
+        databaseUpdate: totalJobDuration - embeddingDuration,
+        total: totalJobDuration
+      });
 
     } catch (error) {
-      console.error(`[EMBEDDING-QUEUE] ❌ Failed job ${job.id}:`, error);
+      const totalJobDuration = Date.now() - jobStartTime;
+      console.error(`[EMBEDDING-QUEUE] ❌ Failed job ${job.id} after ${totalJobDuration}ms:`, error);
 
       const attempts = job.attempts + 1;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
+      console.log(`[EMBEDDING-QUEUE] 🔄 Job attempt ${attempts}/${job.max_attempts}`);
+
       if (attempts >= job.max_attempts) {
         // Mark as failed
+        console.error(`[EMBEDDING-QUEUE] 💀 Job ${job.id} failed permanently after ${attempts} attempts`);
         await this.updateJobStatus(job.id, 'failed', errorMessage);
       } else {
         // Retry later
+        console.log(`[EMBEDDING-QUEUE] ⏰ Job ${job.id} will be retried (attempt ${attempts}/${job.max_attempts})`);
         await this.supabase
           .from('embedding_queue')
           .update({
@@ -201,6 +250,8 @@ export class EmbeddingQueue {
    * Get queue statistics
    */
   async getQueueStats(): Promise<QueueStats> {
+    await this.ensureInitialized();
+    
     const { data, error } = await this.supabase
       .from('embedding_queue')
       .select('status')
@@ -230,6 +281,8 @@ export class EmbeddingQueue {
    * Clean up old completed jobs
    */
   async cleanupCompletedJobs(olderThanDays: number = 7): Promise<void> {
+    await this.ensureInitialized();
+    
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
 
@@ -280,6 +333,8 @@ export class EmbeddingQueue {
    * Force process all pending jobs for a specific document
    */
   async processDocumentJobs(documentId: string): Promise<void> {
+    await this.ensureInitialized();
+    
     console.log(`[EMBEDDING-QUEUE] Force processing jobs for document ${documentId}`);
 
     const { data: jobs, error } = await this.supabase

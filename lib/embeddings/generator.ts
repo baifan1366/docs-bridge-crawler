@@ -16,8 +16,10 @@ const EMBEDDING_DIM_LARGE = 1024;
  * Automatically adds "passage: " prefix for document embeddings
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
+  const startTime = Date.now();
   try {
-    console.log(`[Crawler Embeddings] Generating embedding for: "${text.substring(0, 50)}..."`);
+    console.log(`[EMBEDDINGS-E5] 🔄 Generating small embedding (${text.length} chars)...`);
+    console.log(`[EMBEDDINGS-E5] 🌐 API URL: ${E5_API_URL}/embed`);
     
     const response = await fetch(`${E5_API_URL}/embed`, {
       method: 'POST',
@@ -30,8 +32,11 @@ export async function generateEmbedding(text: string): Promise<number[]> {
       }),
     });
     
+    const duration = Date.now() - startTime;
+    
     if (!response.ok) {
       const errorText = await response.text();
+      console.error(`[EMBEDDINGS-E5] ❌ API error (${response.status}) after ${duration}ms: ${errorText}`);
       throw new Error(`E5 API error (${response.status}): ${errorText}`);
     }
     
@@ -39,17 +44,21 @@ export async function generateEmbedding(text: string): Promise<number[]> {
     const embedding = data.embedding as number[];
     
     if (!embedding || !Array.isArray(embedding)) {
+      console.error(`[EMBEDDINGS-E5] ❌ Invalid response format after ${duration}ms:`, data);
       throw new Error('Invalid response format from E5 API');
     }
     
     if (embedding.length !== EMBEDDING_DIM_SMALL) {
+      console.error(`[EMBEDDINGS-E5] ❌ Wrong dimension after ${duration}ms: got ${embedding.length}, expected ${EMBEDDING_DIM_SMALL}`);
       throw new Error(`Expected ${EMBEDDING_DIM_SMALL}-dim embedding, got ${embedding.length}-dim`);
     }
     
-    console.log(`[Crawler Embeddings] ✅ Generated ${embedding.length}-dim embedding`);
+    console.log(`[EMBEDDINGS-E5] ✅ Generated ${embedding.length}-dim embedding in ${duration}ms`);
+    console.log(`[EMBEDDINGS-E5] 📊 Vector stats: min=${Math.min(...embedding).toFixed(4)}, max=${Math.max(...embedding).toFixed(4)}`);
     return embedding;
   } catch (error) {
-    console.error('[Crawler Embeddings] Error generating embedding:', error);
+    const duration = Date.now() - startTime;
+    console.error(`[EMBEDDINGS-E5] ❌ Error after ${duration}ms:`, error);
     throw new Error(`Failed to generate embedding: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
@@ -58,8 +67,10 @@ export async function generateEmbedding(text: string): Promise<number[]> {
  * Generate 1024-dim embedding using BGE-M3 API
  */
 export async function generateEmbeddingLarge(text: string): Promise<number[]> {
+  const startTime = Date.now();
   try {
-    console.log(`[Crawler Embeddings] Generating large embedding for: "${text.substring(0, 50)}..."`);
+    console.log(`[EMBEDDINGS-BGE] 🔄 Generating large embedding (${text.length} chars)...`);
+    console.log(`[EMBEDDINGS-BGE] 🌐 API URL: ${BGE_API_URL}/embed`);
     
     const response = await fetch(`${BGE_API_URL}/embed`, {
       method: 'POST',
@@ -72,8 +83,11 @@ export async function generateEmbeddingLarge(text: string): Promise<number[]> {
       }),
     });
     
+    const duration = Date.now() - startTime;
+    
     if (!response.ok) {
       const errorText = await response.text();
+      console.error(`[EMBEDDINGS-BGE] ❌ API error (${response.status}) after ${duration}ms: ${errorText}`);
       throw new Error(`BGE API error (${response.status}): ${errorText}`);
     }
     
@@ -81,17 +95,21 @@ export async function generateEmbeddingLarge(text: string): Promise<number[]> {
     const embedding = data.embedding as number[];
     
     if (!embedding || !Array.isArray(embedding)) {
+      console.error(`[EMBEDDINGS-BGE] ❌ Invalid response format after ${duration}ms:`, data);
       throw new Error('Invalid response format from BGE API');
     }
     
     if (embedding.length !== EMBEDDING_DIM_LARGE) {
+      console.error(`[EMBEDDINGS-BGE] ❌ Wrong dimension after ${duration}ms: got ${embedding.length}, expected ${EMBEDDING_DIM_LARGE}`);
       throw new Error(`Expected ${EMBEDDING_DIM_LARGE}-dim embedding, got ${embedding.length}-dim`);
     }
     
-    console.log(`[Crawler Embeddings] ✅ Generated ${embedding.length}-dim large embedding`);
+    console.log(`[EMBEDDINGS-BGE] ✅ Generated ${embedding.length}-dim large embedding in ${duration}ms`);
+    console.log(`[EMBEDDINGS-BGE] 📊 Vector stats: min=${Math.min(...embedding).toFixed(4)}, max=${Math.max(...embedding).toFixed(4)}`);
     return embedding;
   } catch (error) {
-    console.error('[Crawler Embeddings] Error generating large embedding:', error);
+    const duration = Date.now() - startTime;
+    console.error(`[EMBEDDINGS-BGE] ❌ Error after ${duration}ms:`, error);
     throw new Error(`Failed to generate large embedding: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
@@ -103,20 +121,32 @@ export async function generateDualEmbeddings(text: string): Promise<{
   small: number[];
   large: number[];
 }> {
+  const startTime = Date.now();
   try {
-    console.log(`[Crawler Embeddings] Generating dual embeddings...`);
+    console.log(`[EMBEDDINGS] 🧠 Generating dual embeddings for text (${text.length} chars)...`);
+    console.log(`[EMBEDDINGS] 📝 Text preview: "${text.substring(0, 100)}..."`);
     
     // Generate both embeddings in parallel
+    console.log(`[EMBEDDINGS] 🚀 Starting parallel embedding generation...`);
+    const parallelStartTime = Date.now();
+    
     const [small, large] = await Promise.all([
       generateEmbedding(text),
       generateEmbeddingLarge(text)
     ]);
     
-    console.log(`[Crawler Embeddings] ✅ Generated dual embeddings: ${small.length}-dim + ${large.length}-dim`);
+    const parallelDuration = Date.now() - parallelStartTime;
+    const totalDuration = Date.now() - startTime;
+    
+    console.log(`[EMBEDDINGS] ✅ Generated dual embeddings in ${totalDuration}ms (parallel: ${parallelDuration}ms)`);
+    console.log(`[EMBEDDINGS] 📊 Results: ${small.length}-dim + ${large.length}-dim vectors`);
+    console.log(`[EMBEDDINGS] 🔢 Small embedding sample: [${small.slice(0, 5).map(n => n.toFixed(4)).join(', ')}...]`);
+    console.log(`[EMBEDDINGS] 🔢 Large embedding sample: [${large.slice(0, 5).map(n => n.toFixed(4)).join(', ')}...]`);
     
     return { small, large };
   } catch (error) {
-    console.error('[Crawler Embeddings] Error generating dual embeddings:', error);
+    const totalDuration = Date.now() - startTime;
+    console.error(`[EMBEDDINGS] ❌ Failed to generate dual embeddings after ${totalDuration}ms:`, error);
     throw new Error(`Failed to generate dual embeddings: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
