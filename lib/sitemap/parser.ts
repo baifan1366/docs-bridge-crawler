@@ -1,8 +1,55 @@
 /**
- * Sitemap parser with lastmod detection
+ * Sitemap parser with lastmod detection and expired path filtering
  */
 
 import { parseStringPromise } from 'xml2js';
+
+// Common patterns for expired/old content paths
+const EXPIRED_PATH_PATTERNS = [
+  /\/bajet-\d{4}-old\//,      // e.g., /bajet-2022-old/
+  /\/old\//,                   // any /old/ path
+  /\/archive\//,               // any /archive/ path
+  /\/archived\//,              // any /archived/ path
+  /\/deprecated\//,            // any /deprecated/ path
+  /\/expired\//,               // any /expired/ path
+  /\/v1\//,                    // old API version paths
+  /\/v2\//,                    // older API version paths
+  /-\d{4}$/,                   // ends with year like -2022
+  /_old$/,                     // ends with _old
+  /_archive$/,                 // ends with _archive
+];
+
+/**
+ * Check if a URL matches any expired path pattern
+ */
+function isExpiredPath(url: string): boolean {
+  return EXPIRED_PATH_PATTERNS.some(pattern => pattern.test(url));
+}
+
+/**
+ * Filter out expired/old content URLs
+ */
+function filterExpiredUrls(urls: SitemapEntry[]): SitemapEntry[] {
+  const before = urls.length;
+  const filtered = urls.filter(entry => !isExpiredPath(entry.url));
+  const after = filtered.length;
+  
+  if (before !== after) {
+    console.log(`[SITEMAP] Filtered out ${before - after} expired URLs`);
+    
+    // Log some examples of filtered URLs for debugging
+    const filteredExamples = urls
+      .filter(entry => isExpiredPath(entry.url))
+      .slice(0, 5)
+      .map(entry => entry.url);
+    
+    if (filteredExamples.length > 0) {
+      console.log(`[SITEMAP] Examples of filtered URLs:`, filteredExamples);
+    }
+  }
+  
+  return filtered;
+}
 
 export interface SitemapEntry {
   url: string;
@@ -48,7 +95,10 @@ export async function parseSitemap(sitemapUrl: string): Promise<SitemapEntry[]> 
     console.warn('[SITEMAP] No URLs found in sitemap');
   }
 
-  return urls;
+  // Filter out expired/old content URLs
+  const filteredUrls = filterExpiredUrls(urls);
+  
+  return filteredUrls;
 }
 
 export async function getUpdatedUrls(
