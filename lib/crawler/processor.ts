@@ -559,26 +559,45 @@ export async function processPage(url: string, sourceId: string) {
         .eq('id', document.id);
     }
 
-    // 16. Detect and enqueue pagination links
-    console.log(`[STEP 16] Detecting pagination links...`);
+    // 16. Detect and enqueue discovered links (pagination + all internal links)
+    console.log(`[STEP 16] Discovering links from page...`);
     const $ = cheerio.load(html);
-    const paginationUrls = detectPaginationLinks($, url);
     
-    if (paginationUrls.length > 0) {
-      console.log(`[STEP 16] Found ${paginationUrls.length} pagination links`);
-      
+    // Get all discovered links from this page
+    const discoveredLinks = discoverAllLinks($, url, source.base_url);
+    console.log(`[STEP 16] Found ${discoveredLinks.length} total links on page`);
+    
+    // Get already crawled URLs to avoid duplicates
+    const { data: existingPages } = await supabase
+      .from('crawler_pages')
+      .select('url')
+      .eq('source_id', sourceId)
+      .in('url', discoveredLinks);
+    
+    const existingUrls = new Set(existingPages?.map(p => p.url) || []);
+    const newLinks = discoveredLinks.filter(link => !existingUrls.has(link));
+    
+    console.log(`[STEP 16] ${existingUrls.size} already crawled, ${newLinks.length} new links to enqueue`);
+    
+    // Enqueue new links
+    if (newLinks.length > 0) {
       const { enqueueCrawlJob } = await import('../qstash/client');
       
-      for (const paginationUrl of paginationUrls) {
+      // Limit to prevent overwhelming the queue
+      const linksToEnqueue = newLinks.slice(0, 50);
+      
+      for (const linkUrl of linksToEnqueue) {
         try {
-          await enqueueCrawlJob(paginationUrl, sourceId);
-          console.log(`[PAGINATION] Enqueued: ${paginationUrl}`);
+          await enqueueCrawlJob(linkUrl, sourceId);
+          console.log(`[LINKS] Enqueued: ${linkUrl}`);
         } catch (error) {
-          console.error(`[PAGINATION] Failed to enqueue ${paginationUrl}:`, error);
+          console.error(`[LINKS] Failed to enqueue ${linkUrl}:`, error);
         }
       }
-    } else {
-      console.log(`[STEP 16] No pagination links found`);
+      
+      if (newLinks.length > 50) {
+        console.log(`[LINKS] Skipped ${newLinks.length - 50} links (limit: 50 per page)`);
+      }
     }
 
     const duration = Date.now() - startTime;
@@ -603,7 +622,8 @@ export async function processPage(url: string, sourceId: string) {
       extraction_method: extracted.extraction_method,
       extraction_confidence: extracted.confidence,
       duration_ms: duration,
-      pagination_links_found: paginationUrls.length,
+      links_discovered: discoveredLinks.length,
+      links_enqueued: newLinks.length,
       images_processed: imageAlts.length,
       tables_processed: tables.length,
       processing_pipeline: {
@@ -885,4 +905,71 @@ function detectPaginationLinks($: cheerio.CheerioAPI, currentUrl: string): strin
   });
   
   return paginationUrls.slice(0, 5);
+}
+
+/**
+ * Discover all internal links from a page
+ * Used for recursive crawling of sites without sitemap
+ */
+function discoverAllLinks($: cheerio.CheerioAPI, currentUrl: string, baseUrl: string): string[] {
+  const links: string[] = [];
+  const baseOrigin = new URL(baseUrl).origin;
+  const currentOrigin = new URL(currentUrl).origin;
+  
+  $('a[href]').each((i, elem) => {
+    const href = $(elem).attr('href');
+    if (!href) return;
+    
+    try {
+      // Skip empty, javascript, mailto, and anchor links
+      if (href.startsWith('javascript:') || 
+          href.startsWith('mailto:') || 
+          href.startsWith('#') ||
+          href.trim() === '') {
+        return;
+      }
+      
+      // Resolve relative URLs
+      let fullUrl: string;
+      if (href.startsWith('http://') || href.startsWith('https://')) {
+        fullUrl = href;
+      } else {
+        fullUrl = new URL(href, currentUrl).toString();
+      }
+      
+      // Check if it's an internal link (same domain)
+      const urlObj = new URL(fullUrl);
+      const isInternal = urlObj.origin === baseOrigin || urlObj.origin === currentOrigin;
+      
+      // Skip if not internal or same as current URL
+      if (!isInternal || fullUrl === currentUrl) {
+        return;
+      }
+      
+      // Skip non-HTML URLs (images, PDFs, etc.)
+      const path = urlObj.pathname.toLowerCase();
+      if (path.endsWith('.png') || 
+          path.endsWith('.jpg') || 
+          path.endsWith('.jpeg') || 
+          path.endsWith('.gif') || 
+          path.endsWith('.svg') ||
+          path.endsWith('.pdf') ||
+          path.endsWith('.zip') ||
+          path.endsWith('.css') ||
+          path.endsWith('.js') ||
+          path.endsWith('.xml') ||
+          path.endsWith('.json')) {
+        return;
+      }
+      
+      // Add to links if not already present
+      if (!links.includes(fullUrl)) {
+        links.push(fullUrl);
+      }
+    } catch (e) {
+      // Invalid URL, skip
+    }
+  });
+  
+  return links;
 }
