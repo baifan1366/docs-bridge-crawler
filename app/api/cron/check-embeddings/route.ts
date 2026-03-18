@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
   const supabase = await createClient();
 
   try {
-    // Get documents that need embedding updates
+    // Get documents with content (filter needs-update in code; PostgREST can't compare columns)
     const { data: documents, error: docsError } = await supabase
       .from('kb_documents')
       .select(`
@@ -36,17 +36,22 @@ export async function GET(request: NextRequest) {
         embeddings_updated_at,
         document_chunks
       `)
-      .not('content', 'is', null)
-      .or('embeddings_updated_at.is.null,updated_at.gt.embeddings_updated_at');
+      .not('content', 'is', null);
 
     if (docsError) throw docsError;
 
-    if (!documents || documents.length === 0) {
+    const documentsNeedingUpdate = (documents || []).filter((doc: any) => {
+      if (!doc.embeddings_updated_at) return true;
+      if (!doc.updated_at) return false;
+      return new Date(doc.updated_at) > new Date(doc.embeddings_updated_at);
+    });
+
+    if (documentsNeedingUpdate.length === 0) {
       console.log('[CRON-EMBEDDINGS] No documents need embedding updates');
       return NextResponse.json({ message: 'No documents to update' });
     }
 
-    console.log(`[CRON-EMBEDDINGS] Found ${documents.length} documents needing updates`);
+    console.log(`[CRON-EMBEDDINGS] Found ${documentsNeedingUpdate.length} documents needing updates`);
 
     const stats = {
       processed: 0,
@@ -58,8 +63,8 @@ export async function GET(request: NextRequest) {
 
     // Process documents in batches to avoid timeout
     const BATCH_SIZE = 5;
-    for (let i = 0; i < documents.length; i += BATCH_SIZE) {
-      const batch = documents.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < documentsNeedingUpdate.length; i += BATCH_SIZE) {
+      const batch = documentsNeedingUpdate.slice(i, i + BATCH_SIZE);
       
       for (const doc of batch) {
         try {

@@ -75,7 +75,7 @@ export async function updateAllDocumentEmbeddings(): Promise<EmbeddingUpdateStat
   };
 
   try {
-    // Get documents that need embedding updates
+    // Get documents with content (filter needs-update in code; PostgREST can't compare columns)
     const { data: documents, error: docsError } = await supabase
       .from('kb_documents')
       .select(`
@@ -86,20 +86,25 @@ export async function updateAllDocumentEmbeddings(): Promise<EmbeddingUpdateStat
         updated_at,
         embeddings_updated_at
       `)
-      .not('content', 'is', null)
-      .or('embeddings_updated_at.is.null,updated_at.gt.embeddings_updated_at');
+      .not('content', 'is', null);
 
     if (docsError) throw docsError;
 
-    if (!documents || documents.length === 0) {
+    const documentsNeedingUpdate = (documents || []).filter((doc: any) => {
+      if (!doc.embeddings_updated_at) return true;
+      if (!doc.updated_at) return false;
+      return new Date(doc.updated_at) > new Date(doc.embeddings_updated_at);
+    });
+
+    if (documentsNeedingUpdate.length === 0) {
       console.log('[EMBEDDING-UPDATER] No documents need embedding updates');
       return stats;
     }
 
-    console.log(`[EMBEDDING-UPDATER] Found ${documents.length} documents needing updates`);
+    console.log(`[EMBEDDING-UPDATER] Found ${documentsNeedingUpdate.length} documents needing updates`);
 
     // Process documents
-    for (const doc of documents) {
+    for (const doc of documentsNeedingUpdate) {
       try {
         await processDocumentEmbeddings(supabase, doc, stats);
       } catch (error) {
