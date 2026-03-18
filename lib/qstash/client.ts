@@ -11,20 +11,34 @@ const qstash = new Client({
 /**
  * Enqueue single crawl job
  */
-export async function enqueueCrawlJob(url: string, sourceId: string) {
+export async function enqueueCrawlJob(
+  url: string,
+  sourceId: string,
+  options?: { depth?: number; maxDepth?: number }
+) {
+  const maxDepth = options?.maxDepth ?? 3; // Default max depth: 3
+  
+  // Don't enqueue if we've reached max depth
+  if (options?.depth !== undefined && options.depth >= maxDepth) {
+    console.log(`[CRAWL] Skipping ${url} - max depth ${maxDepth} reached`);
+    return null;
+  }
+
   const result = await qstash.publishJSON({
     url: process.env.WORKER_WEBHOOK_URL!,
     body: {
       type: 'crawl',
       url,
       sourceId,
+      depth: (options?.depth ?? 0) + 1, // Increment depth for child pages
+      maxDepth,
       timestamp: new Date().toISOString()
     },
     retries: 3,
     delay: 0
   });
 
-  console.log(`Enqueued job ${result.messageId} for ${url}`);
+  console.log(`Enqueued job ${result.messageId} for ${url} (depth: ${(options?.depth ?? 0) + 1}/${maxDepth})`);
   return result;
 }
 
@@ -58,25 +72,35 @@ export async function enqueueBatchCrawl(
 export async function enqueueCrawlWithFlowControl(
   url: string,
   sourceId: string,
-  domain: string
+  domain: string,
+  options?: { depth?: number; maxDepth?: number }
 ) {
+  const maxDepth = options?.maxDepth ?? 3;
+  
+  if (options?.depth !== undefined && options.depth >= maxDepth) {
+    console.log(`[CRAWL] Skipping ${url} - max depth ${maxDepth} reached`);
+    return null;
+  }
+
   const result = await qstash.publishJSON({
     url: process.env.WORKER_WEBHOOK_URL!,
     body: {
       type: 'crawl',
       url,
       sourceId,
+      depth: (options?.depth ?? 0) + 1,
+      maxDepth,
       timestamp: new Date().toISOString()
     },
     // @ts-ignore - flowControl is not in types yet
     flowControl: {
       key: domain,
-      parallelism: 1,  // Only 1 concurrent request per domain
-      rate: 5,          // 5 requests per period (very conservative)
-      period: 60        // per 60 seconds = 1 request every 12 seconds
+      parallelism: 1,
+      rate: 5,
+      period: 60
     },
-    retries: 2,         // Reduced retries to avoid wasting time
-    delay: Math.floor(Math.random() * 10) // Random delay 0-10 seconds
+    retries: 2,
+    delay: Math.floor(Math.random() * 10)
   });
 
   return result;

@@ -23,11 +23,19 @@ import { parseDocumentStructure } from '../processing/structure-parser';
 import { normalizeText } from '../processing/text-normalizer';
 import { SemanticChunker } from '../processing/semantic-chunker';
 import { generateMetadata } from '../processing/metadata-generator';
+import { AntiBlockCrawler } from './anti-block';
 
 
-export async function processPage(url: string, sourceId: string) {
+export async function processPage(
+  url: string,
+  sourceId: string,
+  options?: { depth?: number; maxDepth?: number }
+) {
+  const currentDepth = options?.depth ?? 0;
+  const maxDepth = options?.maxDepth ?? 3;
+  
   console.log(`[START] Processing: ${url}`);
-  console.log(`[INFO] Source ID: ${sourceId}`);
+  console.log(`[INFO] Source ID: ${sourceId}, Depth: ${currentDepth}/${maxDepth}`);
   const startTime = Date.now();
   
   const supabase = await createClient();
@@ -65,6 +73,17 @@ export async function processPage(url: string, sourceId: string) {
     }
 
     console.log(`[STEP 1] Source found: ${source.name}`);
+
+    // 1.5 Check robots.txt compliance
+    console.log(`[STEP 1.5] Checking robots.txt compliance...`);
+    const antiBlock = new AntiBlockCrawler();
+    const canCrawl = await antiBlock.canCrawl(url);
+    if (!canCrawl) {
+      console.log(`[SKIP] Blocked by robots.txt: ${url}`);
+      await updatePageStatus(supabase, url, 'skipped', 'Blocked by robots.txt');
+      return { status: 'skipped', reason: 'robots-blocked' };
+    }
+    console.log(`[STEP 1.5] Robots.txt check passed`);
 
     // 2. Get existing page data
     console.log(`[STEP 2] Checking for existing page...`);
@@ -579,8 +598,8 @@ export async function processPage(url: string, sourceId: string) {
     
     console.log(`[STEP 16] ${existingUrls.size} already crawled, ${newLinks.length} new links to enqueue`);
     
-    // Enqueue new links
-    if (newLinks.length > 0) {
+    // Enqueue new links (only if we haven't reached max depth)
+    if (newLinks.length > 0 && currentDepth < maxDepth) {
       const { enqueueCrawlJob } = await import('../qstash/client');
       
       // Limit to prevent overwhelming the queue
@@ -588,8 +607,8 @@ export async function processPage(url: string, sourceId: string) {
       
       for (const linkUrl of linksToEnqueue) {
         try {
-          await enqueueCrawlJob(linkUrl, sourceId);
-          console.log(`[LINKS] Enqueued: ${linkUrl}`);
+          await enqueueCrawlJob(linkUrl, sourceId, { depth: currentDepth, maxDepth });
+          console.log(`[LINKS] Enqueued: ${linkUrl} (depth: ${currentDepth + 1}/${maxDepth})`);
         } catch (error) {
           console.error(`[LINKS] Failed to enqueue ${linkUrl}:`, error);
         }
@@ -598,6 +617,8 @@ export async function processPage(url: string, sourceId: string) {
       if (newLinks.length > 50) {
         console.log(`[LINKS] Skipped ${newLinks.length - 50} links (limit: 50 per page)`);
       }
+    } else if (currentDepth >= maxDepth) {
+      console.log(`[LINKS] Max depth ${maxDepth} reached, not enqueuing child links`);
     }
 
     const duration = Date.now() - startTime;

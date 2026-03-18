@@ -48,9 +48,12 @@ async function handler(req: NextRequest) {
       const initialQueueStats = await embeddingQueue.getQueueStats();
       console.log(`[WEBHOOK:${requestId}] 📊 Initial embedding queue stats:`, initialQueueStats);
       
-      // Process the page
+      // Process the page (pass depth info if available)
       const processingStartTime = Date.now();
-      const result = await processPage(url, sourceId);
+      const result = await processPage(url, sourceId, { 
+        depth: body.depth ?? 0, 
+        maxDepth: body.maxDepth ?? 3 
+      });
       const processingDuration = Date.now() - processingStartTime;
       
       console.log(`[WEBHOOK:${requestId}] ✅ Page processing completed in ${processingDuration}ms`);
@@ -61,7 +64,8 @@ async function handler(req: NextRequest) {
         extraction_method: result.extraction_method,
         extraction_confidence: result.extraction_confidence,
         duration_ms: result.duration_ms,
-        pagination_links_found: result.pagination_links_found,
+        links_discovered: result.links_discovered,
+        links_enqueued: result.links_enqueued,
         images_processed: result.images_processed,
         tables_processed: result.tables_processed
       });
