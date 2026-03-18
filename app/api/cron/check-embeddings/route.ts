@@ -1,13 +1,16 @@
 /**
  * Cron job to check and update document embeddings
  * Runs daily at 2 AM to check if kb_documents need embedding updates
- * Note: Hobby accounts are limited to daily cron jobs
+ * Supports pagination to avoid 300s timeout - schedules follow-up jobs if needed
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { generateDualEmbeddings } from '@/lib/embeddings/generator';
 import { createHash } from 'crypto';
+import { scheduleEmbeddingCheck } from '@/lib/qstash/scheduler';
+
+const BATCH_SIZE = 5; // Process 5 docs per request to stay under timeout
 
 export async function GET(request: NextRequest) {
   const startTime = Date.now();
@@ -19,12 +22,22 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  console.log('[CRON-EMBEDDINGS] Starting embedding check...');
+  // Check for pagination offset from query params
+  const searchParams = request.nextUrl.searchParams;
+  const offset = parseInt(searchParams.get('offset') || '0');
+
+  console.log(`[CRON-EMBEDDINGS] Starting embedding check... (offset: ${offset})`);
 
   const supabase = await createClient();
 
   try {
-    // Get documents with content (filter needs-update in code; PostgREST can't compare columns)
+    // Get total count first
+    const { count: totalCount } = await supabase
+      .from('kb_documents')
+      .select('*', { count: 'exact', head: true })
+      .not('content', 'is', null);
+
+    // Get documents with content, paginated
     const { data: documents, error: docsError } = await supabase
       .from('kb_documents')
       .select(`
@@ -36,7 +49,9 @@ export async function GET(request: NextRequest) {
         embeddings_updated_at,
         document_chunks
       `)
-      .not('content', 'is', null);
+      .not('content', 'is', null)
+      .range(offset, offset + BATCH_SIZE - 1)
+      .order('updated_at', { ascending: false });
 
     if (docsError) throw docsError;
 
@@ -46,39 +61,42 @@ export async function GET(request: NextRequest) {
       return new Date(doc.updated_at) > new Date(doc.embeddings_updated_at);
     });
 
-    if (documentsNeedingUpdate.length === 0) {
+    const hasMore = offset + BATCH_SIZE < (totalCount || 0);
+    const remaining = (totalCount || 0) - offset - (documents?.length || 0);
+
+    if (documentsNeedingUpdate.length === 0 && !hasMore) {
       console.log('[CRON-EMBEDDINGS] No documents need embedding updates');
-      return NextResponse.json({ message: 'No documents to update' });
+      return NextResponse.json({ message: 'No documents to update', remaining: 0 });
     }
 
-    console.log(`[CRON-EMBEDDINGS] Found ${documentsNeedingUpdate.length} documents needing updates`);
+    console.log(`[CRON-EMBEDDINGS] Found ${documentsNeedingUpdate.length} docs needing updates (remaining: ${remaining})`);
 
     const stats = {
       processed: 0,
       updated: 0,
       errors: 0,
       chunks_created: 0,
-      chunks_updated: 0
+      chunks_updated: 0,
+      offset,
+      has_more: hasMore,
+      remaining
     };
 
-    // Process documents in batches to avoid timeout
-    const BATCH_SIZE = 5;
-    for (let i = 0; i < documentsNeedingUpdate.length; i += BATCH_SIZE) {
-      const batch = documentsNeedingUpdate.slice(i, i + BATCH_SIZE);
-      
-      for (const doc of batch) {
-        try {
-          await processDocumentEmbeddings(supabase, doc, stats);
-        } catch (error) {
-          console.error(`[CRON-EMBEDDINGS] Error processing document ${doc.id}:`, error);
-          stats.errors++;
-        }
+    // Process current batch
+    for (const doc of documentsNeedingUpdate) {
+      try {
+        await processDocumentEmbeddings(supabase, doc, stats);
+      } catch (error) {
+        console.error(`[CRON-EMBEDDINGS] Error processing document ${doc.id}:`, error);
+        stats.errors++;
       }
-      
-      // Small delay between batches
-      if (i + BATCH_SIZE < documents.length) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+    }
+
+    // Schedule follow-up if there are more documents
+    if (hasMore) {
+      const nextOffset = offset + BATCH_SIZE;
+      console.log(`[CRON-EMBEDDINGS] Scheduling follow-up at offset ${nextOffset}`);
+      await scheduleEmbeddingCheck(nextOffset);
     }
 
     const duration = Date.now() - startTime;
@@ -134,7 +152,7 @@ async function processDocumentEmbeddings(
 
   stats.processed++;
 
-  // Split content into chunks (simple implementation)
+  // Split content into chunks
   const chunks = splitIntoChunks(doc.content);
   console.log(`[CRON-EMBEDDINGS] Split into ${chunks.length} chunks`);
 
@@ -243,7 +261,7 @@ async function processDocumentEmbeddings(
   stats.chunks_created += chunksCreated;
   stats.chunks_updated += chunksUpdated;
 
-  console.log(`[CRON-EMBEDDINGS] ✅ Updated document ${doc.id}: ${chunksCreated} created, ${chunksUpdated} updated`);
+  console.log(`[CRON-EMBEDDINGS] Updated document ${doc.id}: ${chunksCreated} created, ${chunksUpdated} updated`);
 }
 
 /**
@@ -259,7 +277,6 @@ function splitIntoChunks(content: string, maxChunkSize: number = 1000): string[]
     const trimmedSentence = sentence.trim();
     if (!trimmedSentence) continue;
     
-    // If adding this sentence would exceed max size, start new chunk
     if (currentChunk.length + trimmedSentence.length > maxChunkSize && currentChunk.length > 0) {
       chunks.push(currentChunk.trim());
       currentChunk = trimmedSentence;
@@ -268,12 +285,10 @@ function splitIntoChunks(content: string, maxChunkSize: number = 1000): string[]
     }
   }
   
-  // Add the last chunk if it has content
   if (currentChunk.trim()) {
     chunks.push(currentChunk.trim());
   }
   
-  // If no chunks were created (e.g., very short content), create one chunk
   if (chunks.length === 0 && content.trim()) {
     chunks.push(content.trim());
   }
@@ -282,9 +297,8 @@ function splitIntoChunks(content: string, maxChunkSize: number = 1000): string[]
 }
 
 /**
- * Estimate token count for a text (rough approximation)
+ * Estimate token count for a text
  */
 function estimateTokenCount(text: string): number {
-  // Rough estimation: ~4 characters per token for most languages
   return Math.ceil(text.length / 4);
 }

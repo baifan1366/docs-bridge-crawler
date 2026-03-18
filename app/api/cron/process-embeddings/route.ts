@@ -1,10 +1,35 @@
 /**
  * Cron job to process embedding queue
  * Runs daily at 4 AM to process pending embedding jobs
+ * Supports pagination to avoid 300s timeout
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getEmbeddingQueue } from '@/lib/queue/embedding-queue';
+import { Client } from '@upstash/qstash';
+
+const qstash = new Client({
+  token: process.env.QSTASH_TOKEN!
+});
+
+const BATCH_SIZE = 20;
+
+async function scheduleFollowUp(delaySeconds: number = 60) {
+  const baseUrl = process.env.VERCEL_URL 
+    ? `https://${process.env.VERCEL_URL}`
+    : process.env.NEXT_PUBLIC_SITE_URL || 'https://your-domain.com';
+  
+  const url = `${baseUrl}/api/cron/process-embeddings`;
+
+  await qstash.publishJSON({
+    url,
+    body: {},
+    retries: 0,
+    delay: delaySeconds
+  });
+
+  console.log(`[CRON-EMBEDDINGS] Scheduled follow-up in ${delaySeconds}s`);
+}
 
 export async function GET(request: NextRequest) {
   const startTime = Date.now();
@@ -35,16 +60,22 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Process queue with larger batch size for cron job
-    const batchSize = Math.min(initialStats.pending, 20); // Process up to 20 jobs
+    // Process queue with batch size
+    const batchSize = Math.min(initialStats.pending, BATCH_SIZE);
     await embeddingQueue.processQueue(batchSize);
 
     // Get final stats
     const finalStats = await embeddingQueue.getQueueStats();
     console.log('[CRON-EMBEDDINGS] Final queue stats:', finalStats);
 
+    // Schedule follow-up if there are still pending jobs
+    if (finalStats.pending > 0) {
+      console.log(`[CRON-EMBEDDINGS] ${finalStats.pending} jobs remaining, scheduling follow-up`);
+      await scheduleFollowUp(30);
+    }
+
     // Cleanup old completed jobs (once per day, roughly)
-    const shouldCleanup = Math.random() < 0.1; // 10% chance
+    const shouldCleanup = Math.random() < 0.1;
     if (shouldCleanup) {
       console.log('[CRON-EMBEDDINGS] Performing cleanup of old jobs...');
       await embeddingQueue.cleanupCompletedJobs(7);
@@ -58,6 +89,7 @@ export async function GET(request: NextRequest) {
       processed_batch_size: batchSize,
       initial_stats: initialStats,
       final_stats: finalStats,
+      has_more: finalStats.pending > 0,
       cleanup_performed: shouldCleanup,
       duration_ms: duration,
       timestamp: new Date().toISOString()

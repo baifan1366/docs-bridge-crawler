@@ -2,13 +2,16 @@
  * Cron job to check for updated pages via sitemap
  * Also supports sources without sitemap (uses link discovery)
  * Runs daily at 2 AM via Vercel Cron
- * Note: Hobby accounts are limited to daily cron jobs with ±59 min precision
+ * Supports pagination to avoid 300s timeout
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getUpdatedUrls } from '@/lib/sitemap/parser';
 import { enqueueCrawlWithFlowControl } from '@/lib/qstash/client';
+import { scheduleSitemapCheck } from '@/lib/qstash/scheduler';
+
+const MAX_URLS_PER_RUN = 50;
 
 export async function GET(request: NextRequest) {
   const startTime = Date.now();
@@ -20,12 +23,60 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  console.log('[CRON] Starting sitemap check...');
+  // Check for continuation params
+  const searchParams = request.nextUrl.searchParams;
+  const sourceId = searchParams.get('source_id');
+  const processedCount = parseInt(searchParams.get('processed') || '0');
+
+  console.log(`[CRON] Starting sitemap check... (source: ${sourceId || 'all'}, processed: ${processedCount})`);
 
   const supabase = await createClient();
 
   try {
-    // Get active sources
+    // If continuing a specific source, process it
+    if (sourceId) {
+      const { data: source, error: sourceError } = await supabase
+        .from('crawler_sources')
+        .select('*')
+        .eq('id', sourceId)
+        .single();
+
+      if (sourceError) throw sourceError;
+      if (!source) {
+        return NextResponse.json({ error: 'Source not found' }, { status: 404 });
+      }
+
+      const domain = new URL(source.base_url).hostname;
+      const urlsToUpdate = await getUpdatedUrls(source.sitemap_url, supabase, source.id);
+
+      const urlsToEnqueue = urlsToUpdate.slice(processedCount, processedCount + MAX_URLS_PER_RUN);
+      const hasMore = processedCount + MAX_URLS_PER_RUN < urlsToUpdate.length;
+
+      if (urlsToEnqueue.length > 0) {
+        console.log(`[CRON] Enqueueing ${urlsToEnqueue.length} URLs (batch ${processedCount / MAX_URLS_PER_RUN + 1})`);
+        
+        for (const url of urlsToEnqueue) {
+          await enqueueCrawlWithFlowControl(url, source.id, domain);
+        }
+
+        // Schedule follow-up if more URLs to process
+        if (hasMore) {
+          await scheduleSitemapCheck(sourceId, processedCount + urlsToEnqueue.length);
+        }
+      }
+
+      return NextResponse.json({
+        message: 'Crawl jobs enqueued',
+        source: source.name,
+        urls_enqueued: urlsToEnqueue.length,
+        urls_pending: urlsToUpdate.length - processedCount - urlsToEnqueue.length,
+        has_more: hasMore,
+        duration_ms: Date.now() - startTime,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Initial run - get active sources
     const { data: sources, error: sourcesError } = await supabase
       .from('crawler_sources')
       .select('*')
@@ -45,48 +96,35 @@ export async function GET(request: NextRequest) {
     for (const source of sources) {
       const domain = new URL(source.base_url).hostname;
       console.log(`[CRON] Checking ${source.name}...`);
-      const sourceStart = Date.now();
 
       try {
         if (source.sitemap_url) {
-          // === Sources WITH sitemap ===
-          console.log(`[CRON] ${source.name} has sitemap, checking for updates...`);
-          
-          const urlsToUpdate = await getUpdatedUrls(
-            source.sitemap_url,
-            supabase,
-            source.id
-          );
-
-          console.log(`[CRON] Source check completed in ${Date.now() - sourceStart}ms`);
+          // Get updated URLs
+          const urlsToUpdate = await getUpdatedUrls(source.sitemap_url, supabase, source.id);
 
           if (urlsToUpdate.length > 0) {
-            console.log(`[CRON] Found ${urlsToUpdate.length} updated URLs for ${source.name}`);
-            
-            const MAX_URLS_PER_RUN = 50;
             const urlsToEnqueue = urlsToUpdate.slice(0, MAX_URLS_PER_RUN);
-            
-            if (urlsToUpdate.length > MAX_URLS_PER_RUN) {
-              console.log(`[CRON] Limiting to ${MAX_URLS_PER_RUN} URLs`);
-            }
-            
-            console.log(`[CRON] Enqueueing ${urlsToEnqueue.length} URLs...`);
-            const enqueueStart = Date.now();
-            
+            const hasMore = urlsToUpdate.length > MAX_URLS_PER_RUN;
+
+            console.log(`[CRON] Enqueueing ${urlsToEnqueue.length} URLs for ${source.name}`);
+
             for (const url of urlsToEnqueue) {
               await enqueueCrawlWithFlowControl(url, source.id, domain);
             }
-            
-            console.log(`[CRON] Enqueue completed in ${Date.now() - enqueueStart}ms`);
+
+            // Schedule follow-up if more URLs
+            if (hasMore) {
+              await scheduleSitemapCheck(source.id, urlsToEnqueue.length);
+            }
 
             stats.push({
               source: source.name,
               type: 'sitemap',
               urls_enqueued: urlsToEnqueue.length,
-              urls_pending: urlsToUpdate.length - urlsToEnqueue.length
+              urls_pending: urlsToUpdate.length - urlsToEnqueue.length,
+              has_more: hasMore
             });
           } else {
-            console.log(`[CRON] No updates for ${source.name}`);
             stats.push({
               source: source.name,
               type: 'sitemap',
@@ -95,16 +133,11 @@ export async function GET(request: NextRequest) {
             });
           }
         } else {
-          // === Sources WITHOUT sitemap (use link discovery) ===
-          console.log(`[CRON] ${source.name} has no sitemap, triggering full crawl from base_url...`);
-          
-          // Enqueue the base_url to start link discovery crawl
+          // Sources without sitemap - trigger link discovery
           await enqueueCrawlWithFlowControl(source.base_url, source.id, domain, {
             depth: 0,
             maxDepth: 3
           });
-          
-          console.log(`[CRON] Enqueued base URL for link discovery crawl`);
           
           stats.push({
             source: source.name,
