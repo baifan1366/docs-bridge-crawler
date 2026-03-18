@@ -20,6 +20,13 @@ export async function POST(request: NextRequest) {
 
     const result = await enqueueCrawlJob(url, sourceId);
 
+    if (!result) {
+      return NextResponse.json(
+        { error: 'Could not enqueue crawl job (may have reached max depth)' },
+        { status: 400 }
+      );
+    }
+
     return NextResponse.json({
       message: 'Crawl job enqueued',
       messageId: result.messageId,
