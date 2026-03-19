@@ -94,8 +94,10 @@ export class EmbeddingQueue {
 
       if (!jobs || jobs.length === 0) return;
 
-      const promises = jobs.map((job: EmbeddingJob) => this.processJob(job));
-      await Promise.allSettled(promises);
+      // Process jobs SEQUENTIALLY to avoid database timeout
+      for (const job of jobs) {
+        await this.processJob(job);
+      }
 
     } catch (error) {
       console.error('[EMBEDDING-QUEUE] Error processing queue:', error);
@@ -117,8 +119,7 @@ export class EmbeddingQueue {
           embedding_large: large,
           updated_at: new Date().toISOString()
         })
-        .eq('id', job.chunk_id)
-        .abortSignal(AbortSignal.timeout(10000));
+        .eq('id', job.chunk_id);
 
       if (updateError) {
         console.error('[EMBEDDING-QUEUE] Failed to save embeddings:', updateError);
@@ -131,7 +132,6 @@ export class EmbeddingQueue {
       const attempts = job.attempts + 1;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      // Check if it's a timeout or server error
       const isRetryable = errorMessage.includes('timeout') || 
                           errorMessage.includes('502') ||
                           errorMessage.includes('503') ||
@@ -234,8 +234,9 @@ export class EmbeddingQueue {
     if (error) throw error;
 
     if (jobs && jobs.length > 0) {
-      const promises = jobs.map((job: EmbeddingJob) => this.processJob(job));
-      await Promise.allSettled(promises);
+      for (const job of jobs) {
+        await this.processJob(job);
+      }
     }
   }
 }

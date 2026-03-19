@@ -9,7 +9,7 @@ import { getEmbeddingQueue } from '@/lib/queue/embedding-queue';
 
 export const maxDuration = 300; // Vercel max
 
-const BATCH_SIZE = 50;
+const BATCH_SIZE = 20; // Reduced to avoid timeout
 const MAX_BATCHES = 100;
 
 async function processBatch(embeddingQueue: any): Promise<{ processed: number; hasMore: boolean }> {
