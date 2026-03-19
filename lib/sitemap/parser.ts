@@ -78,6 +78,7 @@ export async function parseSitemap(sitemapUrl: string): Promise<SitemapEntry[]> 
   const urls: SitemapEntry[] = [];
 
   if (parsed.urlset?.url) {
+    // Standard sitemap with URLs
     for (const entry of parsed.urlset.url) {
       urls.push({
         url: entry.loc[0],
@@ -88,9 +89,25 @@ export async function parseSitemap(sitemapUrl: string): Promise<SitemapEntry[]> 
     }
     console.log(`[SITEMAP] Found ${urls.length} URLs in sitemap`);
   } else if (parsed.sitemapindex?.sitemap) {
-    console.log(`[SITEMAP] Found sitemap index with ${parsed.sitemapindex.sitemap.length} sitemaps`);
-    // Handle sitemap index - just log for now
-    console.warn('[SITEMAP] Sitemap index detected but not fully supported yet');
+    // Sitemap index - recursively fetch all child sitemaps
+    const childSitemaps = parsed.sitemapindex.sitemap;
+    console.log(`[SITEMAP] Found sitemap index with ${childSitemaps.length} child sitemaps`);
+    
+    for (let i = 0; i < childSitemaps.length; i++) {
+      const child = childSitemaps[i];
+      const childUrl = child.loc[0];
+      console.log(`[SITEMAP] Fetching child sitemap ${i + 1}/${childSitemaps.length}: ${childUrl}`);
+      
+      try {
+        const childUrls = await parseSitemap(childUrl);
+        urls.push(...childUrls);
+        console.log(`[SITEMAP] Added ${childUrls.length} URLs from child sitemap`);
+      } catch (error) {
+        console.error(`[SITEMAP] Error fetching child sitemap ${childUrl}:`, error);
+      }
+    }
+    
+    console.log(`[SITEMAP] Total URLs from all sitemaps: ${urls.length}`);
   } else {
     console.warn('[SITEMAP] No URLs found in sitemap');
   }
