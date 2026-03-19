@@ -12,7 +12,7 @@ const qstash = new Client({
   token: process.env.QSTASH_TOKEN!
 });
 
-const BATCH_SIZE = 20;
+const BATCH_SIZE = 100;
 
 async function scheduleFollowUp(delaySeconds: number = 60) {
   const baseUrl = process.env.VERCEL_URL 

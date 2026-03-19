@@ -23,7 +23,7 @@ export const CRAWLER_CONFIG = {
   MAX_TITLE_LENGTH: 500, // Maximum title length
   
   // Embedding configuration
-  EMBEDDING_BATCH_SIZE: 5, // Process embeddings in batches
+  EMBEDDING_BATCH_SIZE: 50, // Process embeddings in batches
   EMBEDDING_TIMEOUT: 60000, // 1 minute timeout for embedding generation
 };
 
