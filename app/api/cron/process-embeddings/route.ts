@@ -1,7 +1,7 @@
 /**
  * Cron job to process embedding queue
  * Runs daily at 4 AM to process all pending embedding jobs
- * Self-calls to continue processing until queue is empty
+ * Triggers next batch before returning response
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -11,9 +11,8 @@ export const maxDuration = 300; // Vercel max
 
 const BATCH_SIZE = 50;
 const MAX_BATCHES = 5;
-const SELF_CALL_DELAY_MS = 2000; // 2 seconds between batches
 
-async function processBatch(embeddingQueue: any, batchNum: number, maxBatches: number): Promise<{ processed: number; hasMore: boolean }> {
+async function processBatch(embeddingQueue: any): Promise<{ processed: number; hasMore: boolean }> {
   const currentStats = await embeddingQueue.getQueueStats();
   
   if (currentStats.pending === 0) {
@@ -23,7 +22,28 @@ async function processBatch(embeddingQueue: any, batchNum: number, maxBatches: n
   const batchSize = Math.min(currentStats.pending, BATCH_SIZE);
   await embeddingQueue.processQueue(batchSize);
   
-  return { processed: batchSize, hasMore: batchNum < maxBatches };
+  return { processed: batchSize, hasMore: true };
+}
+
+function triggerNextBatch(baseUrl: string, nextBatch: number, maxBatches: number): void {
+  const url = `${baseUrl}/api/cron/process-embeddings?batch=${nextBatch}&max_batches=${maxBatches}`;
+  
+  // Fire and forget - Vercel will keep process alive long enough for fetch to start
+  fetch(url, {
+    method: 'GET',
+    headers: { 
+      'Authorization': `Bearer ${process.env.CRON_SECRET}`,
+      'Content-Type': 'application/json'
+    }
+  }).then(response => {
+    if (response.ok) {
+      console.log(`[CRON-EMBEDDINGS] Next batch ${nextBatch} triggered successfully`);
+    } else {
+      console.error(`[CRON-EMBEDDINGS] Next batch ${nextBatch} failed: ${response.status}`);
+    }
+  }).catch(error => {
+    console.error(`[CRON-EMBEDDINGS] Next batch ${nextBatch} error:`, error);
+  });
 }
 
 export async function GET(request: NextRequest) {
@@ -38,11 +58,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  console.log(`[CRON-EMBEDDINGS] Batch ${batchNum}/${maxBatches} starting...`);
+
   try {
     const embeddingQueue = getEmbeddingQueue();
     const initialStats = await embeddingQueue.getQueueStats();
 
     if (initialStats.pending === 0) {
+      console.log('[CRON-EMBEDDINGS] No pending jobs');
       return NextResponse.json({
         message: 'No pending jobs',
         batch: batchNum,
@@ -52,39 +75,30 @@ export async function GET(request: NextRequest) {
     }
 
     // Process this batch
-    const { processed, hasMore } = await processBatch(embeddingQueue, batchNum, maxBatches);
-
-    if (hasMore && batchNum < maxBatches) {
-      // Self-call to continue with next batch
-      const baseUrl = process.env.VERCEL_URL 
-        ? `https://${process.env.VERCEL_URL}`
-        : process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
-      
-      const nextUrl = `${baseUrl}/api/cron/process-embeddings?batch=${batchNum + 1}&max_batches=${maxBatches}`;
-      
-      // Call next batch after a delay
-      setTimeout(async () => {
-        try {
-          await fetch(nextUrl, {
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${process.env.CRON_SECRET}` }
-          });
-        } catch (error) {
-          console.error('[CRON-EMBEDDINGS] Self-call failed:', error);
-        }
-      }, SELF_CALL_DELAY_MS);
-    }
+    const { processed, hasMore } = await processBatch(embeddingQueue);
+    console.log(`[CRON-EMBEDDINGS] Batch ${batchNum}: processed ${processed} jobs`);
 
     const finalStats = await embeddingQueue.getQueueStats();
 
     // Cleanup old jobs
     await embeddingQueue.cleanupCompletedJobs(7);
 
+    // Trigger next batch before returning
+    if (hasMore && batchNum < maxBatches) {
+      const baseUrl = process.env.VERCEL_URL 
+        ? `https://${process.env.VERCEL_URL}`
+        : process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
+      
+      console.log(`[CRON-EMBEDDINGS] Triggering batch ${batchNum + 1}...`);
+      triggerNextBatch(baseUrl, batchNum + 1, maxBatches);
+    }
+
     return NextResponse.json({
-      message: hasMore ? 'Batch processed, continuing...' : 'Completed',
+      message: hasMore && batchNum < maxBatches ? `Batch ${batchNum} done, batch ${batchNum + 1} triggered` : 'Completed',
       batch: batchNum,
       processed_in_batch: processed,
-      has_more: hasMore,
+      has_more: hasMore && batchNum < maxBatches,
+      remaining: finalStats.pending,
       initial_stats: initialStats,
       final_stats: finalStats,
       duration_ms: Date.now() - startTime
