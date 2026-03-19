@@ -30,7 +30,10 @@ async function scheduleFollowUp(delaySeconds: number = 60) {
       url,
       body: {},
       retries: 0,
-      delay: delaySeconds
+      delay: delaySeconds,
+      headers: {
+        'x-vercel-protection-bypass': process.env.VERCEL_AUTOMATION_BYPASS_SECRET || ''
+      }
     });
     console.log(`[CRON-EMBEDDINGS] Follow-up scheduled successfully, messageId: ${result.messageId}`);
   } catch (error) {
