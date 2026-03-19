@@ -10,7 +10,7 @@
       "schedule": "0 3 * * *"
     },
     {
-      "path": "/api/cron/process-embeddings",
+      "path": "/api/cron/process-embeddings?max_batches=100",
       "schedule": "0 4 * * *"
     }
   ]
