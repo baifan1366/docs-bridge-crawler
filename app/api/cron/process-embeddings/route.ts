@@ -22,13 +22,18 @@ async function processBatch(embeddingQueue: any): Promise<{ processed: number; h
   const batchSize = Math.min(currentStats.pending, BATCH_SIZE);
   await embeddingQueue.processQueue(batchSize);
   
-  return { processed: batchSize, hasMore: true };
+  // Check if there are still pending jobs after processing
+  const updatedStats = await embeddingQueue.getQueueStats();
+  
+  return { 
+    processed: batchSize, 
+    hasMore: updatedStats.pending > 0 
+  };
 }
 
 export async function GET(request: NextRequest) {
   const startTime = Date.now();
   const searchParams = request.nextUrl.searchParams;
-  const batchNum = parseInt(searchParams.get('batch') || '1');
   const maxBatches = parseInt(searchParams.get('max_batches') || String(MAX_BATCHES));
   
   const authHeader = request.headers.get('authorization');
@@ -37,7 +42,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  console.log(`[CRON-EMBEDDINGS] Batch ${batchNum}/${maxBatches} starting...`);
+  console.log(`[CRON-EMBEDDINGS] Starting processing with max ${maxBatches} batches...`);
 
   try {
     const embeddingQueue = getEmbeddingQueue();
@@ -47,23 +52,47 @@ export async function GET(request: NextRequest) {
       console.log('[CRON-EMBEDDINGS] No pending jobs');
       return NextResponse.json({
         message: 'No pending jobs',
-        batch: batchNum,
         stats: initialStats,
         duration_ms: Date.now() - startTime
       });
     }
 
-    const { processed, hasMore } = await processBatch(embeddingQueue);
-    console.log(`[CRON-EMBEDDINGS] Batch ${batchNum}: processed ${processed} jobs`);
+    let totalProcessed = 0;
+    let currentBatch = 1;
+    let hasMore = true;
+
+    // Process multiple batches in a single cron run
+    while (hasMore && currentBatch <= maxBatches) {
+      console.log(`[CRON-EMBEDDINGS] Batch ${currentBatch}/${maxBatches} starting...`);
+      
+      const { processed, hasMore: batchHasMore } = await processBatch(embeddingQueue);
+      totalProcessed += processed;
+      hasMore = batchHasMore;
+      
+      console.log(`[CRON-EMBEDDINGS] Batch ${currentBatch}: processed ${processed} jobs`);
+      
+      if (!hasMore) {
+        console.log('[CRON-EMBEDDINGS] No more jobs to process');
+        break;
+      }
+      
+      currentBatch++;
+      
+      // Check if we're approaching Vercel's timeout limit (300s)
+      const elapsedTime = Date.now() - startTime;
+      if (elapsedTime > 250000) { // 250 seconds, leave 50s buffer
+        console.log(`[CRON-EMBEDDINGS] Approaching timeout limit, stopping at batch ${currentBatch - 1}`);
+        break;
+      }
+    }
 
     const finalStats = await embeddingQueue.getQueueStats();
     await embeddingQueue.cleanupCompletedJobs(7);
 
     return NextResponse.json({
       message: 'Completed',
-      batch: batchNum,
-      processed_in_batch: processed,
-      has_more: hasMore && batchNum < maxBatches,
+      total_batches_processed: currentBatch - 1,
+      total_jobs_processed: totalProcessed,
       remaining: finalStats.pending,
       initial_stats: initialStats,
       final_stats: finalStats,
