@@ -14,7 +14,7 @@ export interface CleaningResult {
     cleanedLength: number;
     elementsRemoved: string[];
     contentScore: number;
-    extractionMethod: 'readability' | 'boilerplate' | 'custom-selectors';
+    extractionMethod: 'readability' | 'boilerplate' | 'custom-selectors' | 'body-fallback';
   };
 }
 
@@ -189,7 +189,27 @@ export class HTMLCleaner {
     }
 
     if (!bestResult) {
-      throw new Error('All content extraction strategies failed');
+      // Fallback: try one more time with just body content
+      const $ = cheerio.load(html);
+      const bodyText = this.cleanTextContent($('body').text());
+      
+      if (bodyText.length > 0) {
+        console.log('[HTML-CLEANER] Using body content as final fallback');
+        bestResult = {
+          cleanText: bodyText,
+          title: $('title').text() || $('h1').first().text() || '',
+          language: $('html').attr('lang') || 'en',
+          metadata: {
+            originalLength: html.length,
+            cleanedLength: bodyText.length,
+            elementsRemoved: [],
+            contentScore: 0,
+            extractionMethod: 'body-fallback'
+          }
+        };
+      } else {
+        throw new Error('All content extraction strategies failed');
+      }
     }
 
     console.log(`[HTML-CLEANER] Best extraction: ${bestResult.metadata.extractionMethod} (score: ${bestScore})`);
