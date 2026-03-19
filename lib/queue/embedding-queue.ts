@@ -29,9 +29,6 @@ export interface QueueStats {
   total: number;
 }
 
-/**
- * Embedding queue manager
- */
 export class EmbeddingQueue {
   private supabase: any;
   private isProcessing: boolean = false;
@@ -50,17 +47,12 @@ export class EmbeddingQueue {
     await this.initPromise;
   }
 
-  /**
-   * Add chunks to embedding queue
-   */
   async enqueueChunks(
     documentId: string,
     chunks: Array<{ id: string; chunk_text: string }>,
     priority: 'high' | 'normal' | 'low' = 'normal'
   ): Promise<void> {
     await this.ensureInitialized();
-    console.log(`[EMBEDDING-QUEUE] 📥 Enqueueing ${chunks.length} chunks for document ${documentId}`);
-    console.log(`[EMBEDDING-QUEUE] 🎯 Priority: ${priority}`);
 
     const jobs: Partial<EmbeddingJob>[] = chunks.map(chunk => ({
       id: `${documentId}_${chunk.id}_${Date.now()}`,
@@ -74,65 +66,36 @@ export class EmbeddingQueue {
       status: 'pending' as const
     }));
 
-    console.log(`[EMBEDDING-QUEUE] 📝 Sample job details:`, {
-      jobId: jobs[0]?.id,
-      chunkId: jobs[0]?.chunk_id,
-      textPreview: jobs[0]?.chunk_text?.substring(0, 100) + '...',
-      textLength: jobs[0]?.chunk_text?.length
-    });
-
-    // Store jobs in database (using a simple table for now)
-    const { error } = await this.supabase
-      .from('embedding_queue')
-      .insert(jobs);
+    const { error } = await this.supabase.from('embedding_queue').insert(jobs);
 
     if (error) {
-      console.error('[EMBEDDING-QUEUE] ❌ Failed to enqueue jobs:', error);
+      console.error('[EMBEDDING-QUEUE] Failed to enqueue jobs:', error);
       throw error;
     }
-
-    console.log(`[EMBEDDING-QUEUE] ✅ Successfully enqueued ${jobs.length} jobs`);
-    console.log(`[EMBEDDING-QUEUE] 🔄 Jobs will be processed by cron job at 4 AM daily`);
   }
 
-  /**
-   * Process pending embedding jobs
-   */
   async processQueue(batchSize: number = CRAWLER_CONFIG.EMBEDDING_BATCH_SIZE): Promise<void> {
     await this.ensureInitialized();
     
-    if (this.isProcessing) {
-      console.log('[EMBEDDING-QUEUE] Already processing, skipping...');
-      return;
-    }
+    if (this.isProcessing) return;
 
     this.isProcessing = true;
-    console.log(`[EMBEDDING-QUEUE] Starting queue processing with batch size ${batchSize}`);
 
     try {
-      // Get pending jobs ordered by priority and creation time
       const { data: jobs, error } = await this.supabase
         .from('embedding_queue')
         .select('*')
         .eq('status', 'pending')
-        .order('priority', { ascending: false }) // high priority first
-        .order('created_at', { ascending: true })  // oldest first
+        .order('priority', { ascending: false })
+        .order('created_at', { ascending: true })
         .limit(batchSize);
 
       if (error) throw error;
 
-      if (!jobs || jobs.length === 0) {
-        console.log('[EMBEDDING-QUEUE] No pending jobs found');
-        return;
-      }
+      if (!jobs || jobs.length === 0) return;
 
-      console.log(`[EMBEDDING-QUEUE] Processing ${jobs.length} jobs`);
-
-      // Process jobs in parallel (but limited by batch size)
       const promises = jobs.map((job: EmbeddingJob) => this.processJob(job));
       await Promise.allSettled(promises);
-
-      console.log('[EMBEDDING-QUEUE] Batch processing completed');
 
     } catch (error) {
       console.error('[EMBEDDING-QUEUE] Error processing queue:', error);
@@ -141,38 +104,12 @@ export class EmbeddingQueue {
     }
   }
 
-  /**
-   * Process a single embedding job
-   */
   private async processJob(job: EmbeddingJob): Promise<void> {
-    const jobStartTime = Date.now();
-    console.log(`[EMBEDDING-QUEUE] 🔄 Processing job ${job.id} for chunk ${job.chunk_id}`);
-    console.log(`[EMBEDDING-QUEUE] 📝 Chunk details:`, {
-      textLength: job.chunk_text.length,
-      textPreview: job.chunk_text.substring(0, 100) + '...',
-      attempts: job.attempts,
-      maxAttempts: job.max_attempts
-    });
-
-    // Mark job as processing
     await this.updateJobStatus(job.id, 'processing');
 
     try {
-      // Generate embeddings
-      console.log(`[EMBEDDING-QUEUE] 🧠 Generating dual embeddings...`);
-      const embeddingStartTime = Date.now();
       const { small, large } = await generateDualEmbeddings(job.chunk_text);
-      const embeddingDuration = Date.now() - embeddingStartTime;
-      
-      console.log(`[EMBEDDING-QUEUE] ✅ Generated embeddings in ${embeddingDuration}ms:`, {
-        smallDim: small.length,
-        largeDim: large.length,
-        smallSample: small.slice(0, 3),
-        largeSample: large.slice(0, 3)
-      });
 
-      // Update document chunk with embeddings
-      console.log(`[EMBEDDING-QUEUE] 💾 Saving embeddings to chunk ${job.chunk_id}...`);
       const { error: updateError } = await this.supabase
         .from('document_chunks')
         .update({
@@ -183,52 +120,28 @@ export class EmbeddingQueue {
         .eq('id', job.chunk_id);
 
       if (updateError) {
-        console.error(`[EMBEDDING-QUEUE] ❌ Failed to save embeddings:`, updateError);
+        console.error('[EMBEDDING-QUEUE] Failed to save embeddings:', updateError);
         throw updateError;
       }
 
-      // Mark job as completed
       await this.updateJobStatus(job.id, 'completed', undefined, new Date().toISOString());
 
-      const totalJobDuration = Date.now() - jobStartTime;
-      console.log(`[EMBEDDING-QUEUE] ✅ Completed job ${job.id} in ${totalJobDuration}ms`);
-      console.log(`[EMBEDDING-QUEUE] 📊 Performance breakdown:`, {
-        embeddingGeneration: embeddingDuration,
-        databaseUpdate: totalJobDuration - embeddingDuration,
-        total: totalJobDuration
-      });
-
     } catch (error) {
-      const totalJobDuration = Date.now() - jobStartTime;
-      console.error(`[EMBEDDING-QUEUE] ❌ Failed job ${job.id} after ${totalJobDuration}ms:`, error);
-
       const attempts = job.attempts + 1;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      console.log(`[EMBEDDING-QUEUE] 🔄 Job attempt ${attempts}/${job.max_attempts}`);
-
       if (attempts >= job.max_attempts) {
-        // Mark as failed
-        console.error(`[EMBEDDING-QUEUE] 💀 Job ${job.id} failed permanently after ${attempts} attempts`);
         await this.updateJobStatus(job.id, 'failed', errorMessage);
       } else {
-        // Retry later
-        console.log(`[EMBEDDING-QUEUE] ⏰ Job ${job.id} will be retried (attempt ${attempts}/${job.max_attempts})`);
-        await this.supabase
-          .from('embedding_queue')
-          .update({
-            status: 'pending',
-            attempts,
-            error_message: errorMessage
-          })
-          .eq('id', job.id);
+        await this.supabase.from('embedding_queue').update({
+          status: 'pending',
+          attempts,
+          error_message: errorMessage
+        }).eq('id', job.id);
       }
     }
   }
 
-  /**
-   * Update job status
-   */
   private async updateJobStatus(
     jobId: string,
     status: EmbeddingJob['status'],
@@ -236,36 +149,23 @@ export class EmbeddingQueue {
     processedAt?: string
   ): Promise<void> {
     const updateData: any = { status };
-    
     if (errorMessage) updateData.error_message = errorMessage;
     if (processedAt) updateData.processed_at = processedAt;
 
-    await this.supabase
-      .from('embedding_queue')
-      .update(updateData)
-      .eq('id', jobId);
+    await this.supabase.from('embedding_queue').update(updateData).eq('id', jobId);
   }
 
-  /**
-   * Get queue statistics
-   */
   async getQueueStats(): Promise<QueueStats> {
     await this.ensureInitialized();
     
     const { data, error } = await this.supabase
       .from('embedding_queue')
       .select('status')
-      .not('status', 'eq', 'completed'); // Exclude old completed jobs
+      .not('status', 'eq', 'completed');
 
     if (error) throw error;
 
-    const stats: QueueStats = {
-      pending: 0,
-      processing: 0,
-      completed: 0,
-      failed: 0,
-      total: 0
-    };
+    const stats: QueueStats = { pending: 0, processing: 0, completed: 0, failed: 0, total: 0 };
 
     if (data) {
       data.forEach((job: any) => {
@@ -277,9 +177,6 @@ export class EmbeddingQueue {
     return stats;
   }
 
-  /**
-   * Clean up old completed jobs
-   */
   async cleanupCompletedJobs(olderThanDays: number = 7): Promise<void> {
     await this.ensureInitialized();
     
@@ -294,21 +191,14 @@ export class EmbeddingQueue {
 
     if (error) {
       console.error('[EMBEDDING-QUEUE] Failed to cleanup old jobs:', error);
-    } else {
-      console.log(`[EMBEDDING-QUEUE] Cleaned up completed jobs older than ${olderThanDays} days`);
     }
   }
 
-  /**
-   * Start automatic queue processing
-   */
   startAutoProcessing(intervalMs: number = 30000): void {
     if (this.processingInterval) {
       clearInterval(this.processingInterval);
     }
 
-    console.log(`[EMBEDDING-QUEUE] Starting auto-processing every ${intervalMs}ms`);
-    
     this.processingInterval = setInterval(async () => {
       try {
         await this.processQueue();
@@ -318,25 +208,16 @@ export class EmbeddingQueue {
     }, intervalMs);
   }
 
-  /**
-   * Stop automatic queue processing
-   */
   stopAutoProcessing(): void {
     if (this.processingInterval) {
       clearInterval(this.processingInterval);
       this.processingInterval = undefined;
-      console.log('[EMBEDDING-QUEUE] Stopped auto-processing');
     }
   }
 
-  /**
-   * Force process all pending jobs for a specific document
-   */
   async processDocumentJobs(documentId: string): Promise<void> {
     await this.ensureInitialized();
     
-    console.log(`[EMBEDDING-QUEUE] Force processing jobs for document ${documentId}`);
-
     const { data: jobs, error } = await this.supabase
       .from('embedding_queue')
       .select('*')
@@ -348,17 +229,12 @@ export class EmbeddingQueue {
     if (jobs && jobs.length > 0) {
       const promises = jobs.map((job: EmbeddingJob) => this.processJob(job));
       await Promise.allSettled(promises);
-      console.log(`[EMBEDDING-QUEUE] Completed processing ${jobs.length} jobs for document ${documentId}`);
     }
   }
 }
 
-// Singleton instance
 let queueInstance: EmbeddingQueue | null = null;
 
-/**
- * Get the global embedding queue instance
- */
 export function getEmbeddingQueue(): EmbeddingQueue {
   if (!queueInstance) {
     queueInstance = new EmbeddingQueue();
