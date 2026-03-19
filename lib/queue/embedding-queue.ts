@@ -117,7 +117,8 @@ export class EmbeddingQueue {
           embedding_large: large,
           updated_at: new Date().toISOString()
         })
-        .eq('id', job.chunk_id);
+        .eq('id', job.chunk_id)
+        .abortSignal(AbortSignal.timeout(10000));
 
       if (updateError) {
         console.error('[EMBEDDING-QUEUE] Failed to save embeddings:', updateError);
@@ -130,7 +131,13 @@ export class EmbeddingQueue {
       const attempts = job.attempts + 1;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      if (attempts >= job.max_attempts) {
+      // Check if it's a timeout or server error
+      const isRetryable = errorMessage.includes('timeout') || 
+                          errorMessage.includes('502') ||
+                          errorMessage.includes('503') ||
+                          errorMessage.includes('fetch');
+
+      if (attempts >= job.max_attempts || !isRetryable) {
         await this.updateJobStatus(job.id, 'failed', errorMessage);
       } else {
         await this.supabase.from('embedding_queue').update({
