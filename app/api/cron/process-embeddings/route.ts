@@ -1,7 +1,7 @@
 /**
  * Cron job to process embedding queue
- * Runs daily at 4 AM to process all pending embedding jobs
- * Triggers next batch before returning response
+ * Runs daily at 4 AM to process pending embedding jobs
+ * Call manually to process batches
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -9,7 +9,7 @@ import { getEmbeddingQueue } from '@/lib/queue/embedding-queue';
 
 export const maxDuration = 300; // Vercel max
 
-const BATCH_SIZE = 20; // Reduced to avoid timeout
+const BATCH_SIZE = 20;
 const MAX_BATCHES = 100;
 
 async function processBatch(embeddingQueue: any): Promise<{ processed: number; hasMore: boolean }> {
@@ -25,36 +25,15 @@ async function processBatch(embeddingQueue: any): Promise<{ processed: number; h
   return { processed: batchSize, hasMore: true };
 }
 
-function triggerNextBatch(baseUrl: string, nextBatch: number, maxBatches: number, authHeader: string): void {
-  const url = `${baseUrl}/api/cron/process-embeddings?batch=${nextBatch}&max_batches=${maxBatches}`;
-  
-  fetch(url, {
-    method: 'GET',
-    headers: { 
-      'Authorization': authHeader,
-      'Content-Type': 'application/json'
-    }
-  }).then(response => {
-    if (response.ok) {
-      console.log(`[CRON-EMBEDDINGS] Batch ${nextBatch} triggered successfully`);
-    } else {
-      console.error(`[CRON-EMBEDDINGS] Batch ${nextBatch} failed: ${response.status}`);
-    }
-  }).catch(error => {
-    console.error(`[CRON-EMBEDDINGS] Batch ${nextBatch} error:`, error);
-  });
-}
-
 export async function GET(request: NextRequest) {
   const startTime = Date.now();
   const searchParams = request.nextUrl.searchParams;
   const batchNum = parseInt(searchParams.get('batch') || '1');
   const maxBatches = parseInt(searchParams.get('max_batches') || String(MAX_BATCHES));
   
-  const authHeader = request.headers.get('authorization') || '';
-  
-  if (!authHeader) {
-    console.error('[CRON-EMBEDDINGS] No authorization header');
+  const authHeader = request.headers.get('authorization');
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    console.error('[CRON-EMBEDDINGS] Unauthorized');
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -74,27 +53,14 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Process this batch
     const { processed, hasMore } = await processBatch(embeddingQueue);
     console.log(`[CRON-EMBEDDINGS] Batch ${batchNum}: processed ${processed} jobs`);
 
     const finalStats = await embeddingQueue.getQueueStats();
-
-    // Cleanup old jobs
     await embeddingQueue.cleanupCompletedJobs(7);
 
-    // Trigger next batch before returning
-    if (hasMore && batchNum < maxBatches) {
-      const baseUrl = process.env.VERCEL_URL 
-        ? `https://${process.env.VERCEL_URL}`
-        : process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
-      
-      console.log(`[CRON-EMBEDDINGS] Triggering batch ${batchNum + 1}...`);
-      triggerNextBatch(baseUrl, batchNum + 1, maxBatches, authHeader);
-    }
-
     return NextResponse.json({
-      message: hasMore && batchNum < maxBatches ? `Batch ${batchNum} done, batch ${batchNum + 1} triggered` : 'Completed',
+      message: 'Completed',
       batch: batchNum,
       processed_in_batch: processed,
       has_more: hasMore && batchNum < maxBatches,
