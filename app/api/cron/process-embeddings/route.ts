@@ -12,6 +12,8 @@ const qstash = new Client({
   token: process.env.QSTASH_TOKEN!
 });
 
+console.log('[CRON-EMBEDDINGS] QStash client initialized, token exists:', !!process.env.QSTASH_TOKEN);
+
 const BATCH_SIZE = 100;
 
 async function scheduleFollowUp(delaySeconds: number = 60) {
@@ -21,14 +23,20 @@ async function scheduleFollowUp(delaySeconds: number = 60) {
   
   const url = `${baseUrl}/api/cron/process-embeddings`;
 
-  await qstash.publishJSON({
-    url,
-    body: {},
-    retries: 0,
-    delay: delaySeconds
-  });
+  console.log(`[CRON-EMBEDDINGS] Scheduling follow-up in ${delaySeconds}s to ${url}`);
 
-  console.log(`[CRON-EMBEDDINGS] Scheduled follow-up in ${delaySeconds}s`);
+  try {
+    const result = await qstash.publishJSON({
+      url,
+      body: {},
+      retries: 0,
+      delay: delaySeconds
+    });
+    console.log(`[CRON-EMBEDDINGS] Follow-up scheduled successfully, messageId: ${result.messageId}`);
+  } catch (error) {
+    console.error('[CRON-EMBEDDINGS] Failed to schedule follow-up:', error);
+    throw error;
+  }
 }
 
 export async function GET(request: NextRequest) {
