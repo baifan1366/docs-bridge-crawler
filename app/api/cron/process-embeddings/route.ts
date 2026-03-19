@@ -1,41 +1,12 @@
 /**
  * Cron job to process embedding queue
- * Runs daily at 4 AM to process pending embedding jobs
- * Supports pagination to avoid 300s timeout
+ * Runs daily at 4 AM to process all pending embedding jobs
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getEmbeddingQueue } from '@/lib/queue/embedding-queue';
-import { Client } from '@upstash/qstash';
-
-const qstash = new Client({
-  token: process.env.QSTASH_TOKEN!
-});
 
 const BATCH_SIZE = 100;
-
-async function scheduleFollowUp(delaySeconds: number = 60) {
-  const baseUrl = process.env.VERCEL_URL 
-    ? `https://${process.env.VERCEL_URL}`
-    : process.env.NEXT_PUBLIC_SITE_URL || 'https://your-domain.com';
-  
-  const url = `${baseUrl}/api/cron/process-embeddings`;
-
-  try {
-    await qstash.publishJSON({
-      url,
-      body: {},
-      retries: 0,
-      delay: delaySeconds,
-      headers: {
-        'x-vercel-protection-bypass': process.env.VERCEL_AUTOMATION_BYPASS_SECRET || ''
-      }
-    });
-  } catch (error) {
-    console.error('[CRON-EMBEDDINGS] Failed to schedule follow-up:', error);
-    throw error;
-  }
-}
 
 export async function GET(request: NextRequest) {
   const startTime = Date.now();
@@ -48,7 +19,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const embeddingQueue = getEmbeddingQueue();
-    const initialStats = await embeddingQueue.getQueueStats();
+    let initialStats = await embeddingQueue.getQueueStats();
 
     if (initialStats.pending === 0) {
       return NextResponse.json({
@@ -58,27 +29,35 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const batchSize = Math.min(initialStats.pending, BATCH_SIZE);
-    await embeddingQueue.processQueue(batchSize);
+    let totalProcessed = 0;
+    let batchesProcessed = 0;
+
+    // Process all pending jobs in a loop
+    while (true) {
+      const currentStats = await embeddingQueue.getQueueStats();
+      
+      if (currentStats.pending === 0) {
+        break;
+      }
+
+      const batchSize = Math.min(currentStats.pending, BATCH_SIZE);
+      await embeddingQueue.processQueue(batchSize);
+      
+      totalProcessed += batchSize;
+      batchesProcessed++;
+    }
 
     const finalStats = await embeddingQueue.getQueueStats();
 
-    if (finalStats.pending > 0) {
-      await scheduleFollowUp(30);
-    }
-
-    const shouldCleanup = Math.random() < 0.1;
-    if (shouldCleanup) {
-      await embeddingQueue.cleanupCompletedJobs(7);
-    }
+    // Cleanup old jobs
+    await embeddingQueue.cleanupCompletedJobs(7);
 
     return NextResponse.json({
       message: 'Completed',
-      processed_batch_size: batchSize,
+      total_processed: totalProcessed,
+      batches_processed: batchesProcessed,
       initial_stats: initialStats,
       final_stats: finalStats,
-      has_more: finalStats.pending > 0,
-      cleanup_performed: shouldCleanup,
       duration_ms: Date.now() - startTime
     });
 
